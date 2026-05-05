@@ -317,16 +317,16 @@ fn main() {
                 match input.parse() {
                     Ok(cmd) => match cmd {
                         Command::ListLayers => {
-                            println!("layers: {{");
+                            println!("\x1b[36mlayers: {{");
                             for (i, Layer { name, .. }) in layers.iter().enumerate().rev() {
                                 let (open, close) = if i == curr_layer {
                                     ('[', ']')
                                 } else {
                                     (' ', ' ')
                                 };
-                                println!("  {open}{i}{close}: {name}");
+                                println!("  {open}{i}{close}:\x1b[0m {name}\x1b[36m");
                             }
-                            println!("}}");
+                            println!("}}\x1b[0m");
                         }
 
                         Command::NewLayer { at, names } => {
@@ -337,12 +337,17 @@ fn main() {
                                             let new_layer =
                                                 &*layers.insert_mut(pos, Layer { name });
                                             curr_layer = pos;
-                                            println!("created layer \"{}\"", new_layer.name);
+                                            println!(
+                                                "\x1b[36mcreated layer\x1b[0m \"{}\"",
+                                                new_layer.name
+                                            );
                                         }
-                                        Err(e) => println!("error creating layer: {e}"),
+                                        Err(e) => {
+                                            println!("\x1b[1;91merror creating layer:\x1b[0m {e}")
+                                        }
                                     },
 
-                                    Err(e) => println!("layer name error: {e}"),
+                                    Err(e) => println!("\x1b[1;91mlayer name error:\x1b[0m {e}"),
                                 }
                             }
                         }
@@ -350,13 +355,13 @@ fn main() {
                         Command::SwitchLayer { to } => {
                             match to.switch_layer(curr_layer, layers.len()) {
                                 Ok(pos) => curr_layer = pos,
-                                Err(e) => println!("error switching layers: {e}"),
+                                Err(e) => println!("\x1b[1;91merror switching layers:\x1b[0m {e}"),
                             }
                         }
 
                         Command::Open { path } => match fs::read(path) {
                             Ok(_) => todo!(),
-                            Err(e) => println!("error opening file: {e}"),
+                            Err(e) => println!("\x1b[1;91merror opening file:\x1b[0m {e}"),
                         },
 
                         Command::Quit => {
@@ -364,7 +369,7 @@ fn main() {
                         }
                     },
 
-                    Err(e) => println!("error parsing command: {e}"),
+                    Err(e) => println!("\x1b[1;91merror parsing command:\x1b[0m {e}"),
                 }
             }
             Err(TryRecvError::Empty) => {}
