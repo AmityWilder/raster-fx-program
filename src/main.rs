@@ -148,7 +148,7 @@ impl fmt::Display for LayerNameError {
             Self::Empty => f.write_str("layer name cannot be entirely empty or whitespace"),
             Self::Illegal(name) => write!(
                 f,
-                "the name {name:?} contains illegal characters; layers cannot contain {ILLEGAL_LAYER_NAME_CHARS:?}"
+                "the name {name:?} contains illegal characters; layer names cannot contain {ILLEGAL_LAYER_NAME_CHARS:?}"
             ),
         }
     }
