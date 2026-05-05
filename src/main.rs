@@ -336,6 +336,7 @@ fn main() {
                                         Ok(pos) => {
                                             let new_layer =
                                                 &*layers.insert_mut(pos, Layer { name });
+                                            curr_layer = pos;
                                             println!("created layer \"{}\"", new_layer.name);
                                         }
                                         Err(e) => println!("error creating layer: {e}"),
