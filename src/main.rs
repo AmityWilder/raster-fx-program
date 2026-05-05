@@ -317,14 +317,14 @@ fn main() {
                 match input.parse() {
                     Ok(cmd) => match cmd {
                         Command::ListLayers => {
-                            println!("\x1b[36mlayers: {{");
+                            println!("\x1b[96mlayers: {{");
                             for (i, Layer { name, .. }) in layers.iter().enumerate().rev() {
                                 let (open, close) = if i == curr_layer {
                                     ('[', ']')
                                 } else {
                                     (' ', ' ')
                                 };
-                                println!("  {open}{i}{close}:\x1b[0m {name}\x1b[36m");
+                                println!("  {open}{i}{close}:\x1b[0m {name}\x1b[96m");
                             }
                             println!("}}\x1b[0m");
                         }
@@ -338,7 +338,7 @@ fn main() {
                                                 &*layers.insert_mut(pos, Layer { name });
                                             curr_layer = pos;
                                             println!(
-                                                "\x1b[36mcreated layer\x1b[0m \"{}\"",
+                                                "\x1b[96mcreated layer\x1b[0m \"{}\"",
                                                 new_layer.name
                                             );
                                         }
