@@ -134,12 +134,41 @@ impl LayerPos {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+const ILLEGAL_LAYER_NAME_CHARS: [char; 4] = ['\\', '"', '\n', '\r'];
+
+#[derive(Debug, Clone)]
+enum LayerNameError {
+    Empty,
+    Illegal(String),
+}
+
+impl fmt::Display for LayerNameError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => f.write_str("layer name cannot be entirely empty or whitespace"),
+            Self::Illegal(name) => write!(
+                f,
+                "the name {name:?} contains illegal characters; layers cannot contain {ILLEGAL_LAYER_NAME_CHARS:?}"
+            ),
+        }
+    }
+}
+
+impl error::Error for LayerNameError {}
+
+#[derive(Debug, Clone)]
 enum Command {
     ListLayers,
-    NewLayer { at: LayerPos, names: Vec<String> },
-    SwitchLayer { to: LayerPos },
-    Open { path: PathBuf },
+    NewLayer {
+        at: LayerPos,
+        names: Vec<Result<String, LayerNameError>>,
+    },
+    SwitchLayer {
+        to: LayerPos,
+    },
+    Open {
+        path: PathBuf,
+    },
     Quit,
 }
 
@@ -222,9 +251,18 @@ impl FromStr for Command {
                     _ => unreachable!(),
                 },
                 names: args
-                    .map(str::trim)
-                    .filter(|arg| !arg.is_empty())
-                    .map(str::to_string)
+                    .map(|mut arg| {
+                        use LayerNameError::*;
+                        arg = arg.trim();
+                        if arg.is_empty() {
+                            return Err(Empty);
+                        }
+                        let name = arg.to_string();
+                        if name.contains(ILLEGAL_LAYER_NAME_CHARS) {
+                            return Err(Illegal(name));
+                        }
+                        Ok(name)
+                    })
                     .collect(),
             }),
 
@@ -286,19 +324,24 @@ fn main() {
                                 } else {
                                     (' ', ' ')
                                 };
-                                println!("{open}{i}{close}: {name}");
+                                println!("  {open}{i}{close}: {name}");
                             }
                             println!("}}");
                         }
 
                         Command::NewLayer { at, names } => {
                             for name in names {
-                                match at.new_layer(curr_layer, layers.len()) {
-                                    Ok(pos) => {
-                                        let new_layer = &*layers.insert_mut(pos, Layer { name });
-                                        println!("created layer \"{:?}\"", new_layer.name);
-                                    }
-                                    Err(e) => println!("error creating layer: {e}"),
+                                match name {
+                                    Ok(name) => match at.new_layer(curr_layer, layers.len()) {
+                                        Ok(pos) => {
+                                            let new_layer =
+                                                &*layers.insert_mut(pos, Layer { name });
+                                            println!("created layer \"{}\"", new_layer.name);
+                                        }
+                                        Err(e) => println!("error creating layer: {e}"),
+                                    },
+
+                                    Err(e) => println!("layer name error: {e}"),
                                 }
                             }
                         }
