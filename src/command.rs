@@ -1,18 +1,53 @@
 use crate::{
     error::*,
-    layer::{Layer, LayerContent},
+    layer::{Layer, LayerContent, Raster},
 };
+use clap::Parser;
 use raylib::prelude::*;
 use std::{fs, ops::ControlFlow, path::PathBuf, str::FromStr};
 
-pub const ILLEGAL_LAYER_NAME_CHARS: [char; 6] = ['\n', '\r', '\t', '\\', '"', '\''];
+/// A string that is not allowed to be empty or contain illegal characters
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct LayerName(String);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+impl LayerName {
+    pub const ILLEGAL_CHARS: [char; 6] = ['\n', '\r', '\t', '\\', '"', '\''];
+}
+
+impl FromStr for LayerName {
+    type Err = LayerNameError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        use LayerNameError::*;
+        let s = s.trim();
+        if s.is_empty() {
+            Err(Empty)
+        } else if s.contains(LayerName::ILLEGAL_CHARS) {
+            Err(Illegal)
+        } else {
+            Ok(Self(s.to_string()))
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LayerPos {
-    #[default]
     Below,
     Above,
     Index(usize),
+}
+
+impl FromStr for LayerPos {
+    type Err = std::num::ParseIntError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "k" => Ok(Self::Above),
+            "j" => Ok(Self::Below),
+            _ => s.parse().map(Self::Index),
+        }
+    }
 }
 
 impl LayerPos {
@@ -103,88 +138,30 @@ impl LayerPos {
     }
 }
 
-#[derive(Debug, Clone)]
+/// Commands
+#[derive(Debug, Clone, Parser)]
+#[command(version)]
 pub enum Command {
-    ListLayers,
-    NewLayer {
-        at: LayerPos,
-        names: Vec<Result<String, LayerNameError>>,
+    #[command(name = "ls")]
+    ListLayers {},
+
+    #[command(name = "mk")]
+    NewLayers { at: LayerPos, names: Vec<LayerName> },
+
+    #[command(name = "rm")]
+    RemoveLayers {
+        /// empty implies current
+        position: Vec<usize>,
     },
-    SwitchLayer {
-        to: LayerPos,
-    },
-    Open {
-        path: PathBuf,
-    },
-    Quit,
-}
 
-impl FromStr for Command {
-    type Err = ParseCommandError;
+    #[command(name = "cd")]
+    SwitchLayer { to: LayerPos },
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        use ParseCommandError::*;
-        let (cmd, args) = s.split_once(' ').unwrap_or((s, ""));
-        let mut args = args.split(','); // todo: make this more advanced
-        match cmd {
-            "ls" => Ok(Self::ListLayers),
+    #[command(name = "open")]
+    Open { path: PathBuf },
 
-            "open" => {
-                #[allow(non_upper_case_globals)]
-                const expect: &str = "1";
-                let path = args.next().ok_or(BadArgCount { actual: 0, expect })?;
-                match args.count() {
-                    0 => Ok(Self::Open { path: path.into() }),
-                    remaining => Err(BadArgCount {
-                        actual: remaining + 1,
-                        expect,
-                    }),
-                }
-            }
-
-            "k" => Ok(Self::SwitchLayer {
-                to: LayerPos::Above,
-            }),
-
-            "j" => Ok(Self::SwitchLayer {
-                to: LayerPos::Below,
-            }),
-
-            _ if let Some(n) = cmd.strip_suffix('G').or_else(|| cmd.strip_suffix("gg")) => n
-                .parse()
-                .map(|idx| Self::SwitchLayer {
-                    to: LayerPos::Index(idx),
-                })
-                .map_err(ParseInt),
-
-            "o" | "O" => Ok(Self::NewLayer {
-                at: match cmd {
-                    "o" => LayerPos::Below,
-                    "O" => LayerPos::Above,
-                    _ => unreachable!(),
-                },
-                names: args
-                    .map(|mut arg| {
-                        use LayerNameError::*;
-                        arg = arg.trim();
-                        if arg.is_empty() {
-                            Err(Empty)
-                        } else if arg.contains(ILLEGAL_LAYER_NAME_CHARS) {
-                            Err(Illegal)
-                        } else {
-                            Ok(arg.to_string())
-                        }
-                    })
-                    .collect(),
-            }),
-
-            "q" => Ok(Self::Quit),
-
-            _ => Err(UnknownCommand {
-                cmd: cmd.to_string(),
-            }),
-        }
-    }
+    #[command(name = "quit")]
+    Quit {},
 }
 
 impl Command {
@@ -195,12 +172,18 @@ impl Command {
         layers: &mut Vec<Layer>,
         curr_layer: &mut usize,
     ) -> Result<ControlFlow<()>, RunCommandError> {
+        use RunCommandError::*;
         match self {
-            Self::ListLayers => list_layers(layers, *curr_layer),
-            Self::NewLayer { at, names } => new_layers(layers, curr_layer, at, names)?,
-            Self::SwitchLayer { to } => switch_layer(layers, curr_layer, to)?,
-            Self::Open { path } => open(rl, thread, layers, curr_layer, path)?,
-            Self::Quit => return Ok(ControlFlow::Break(())),
+            Self::ListLayers {} => list_layers(layers, *curr_layer),
+            Self::NewLayers { at, names } => new_layers(rl, thread, layers, curr_layer, at, names)?,
+            Self::RemoveLayers { position } => {
+                remove_layers(layers, curr_layer, position).map_err(RemoveLayer)?
+            }
+            Self::SwitchLayer { to } => {
+                switch_layer(layers, curr_layer, to).map_err(SwitchLayer)?
+            }
+            Self::Open { path } => open(rl, thread, layers, curr_layer, path).map_err(OpenFile)?,
+            Self::Quit {} => return Ok(ControlFlow::Break(())),
         }
         Ok(ControlFlow::Continue(()))
     }
@@ -220,15 +203,26 @@ fn list_layers(layers: &[Layer], curr_layer: usize) {
 }
 
 fn new_layers(
+    rl: &mut RaylibHandle,
+    thread: &RaylibThread,
     layers: &mut Vec<Layer>,
     curr_layer: &mut usize,
     at: LayerPos,
-    names: Vec<Result<String, LayerNameError>>,
-) -> Result<(), RunCommandError> {
-    use RunCommandError::*;
+    names: Vec<LayerName>,
+) -> Result<(), NewLayerError> {
     names.into_iter().try_for_each(|name| {
-        name.map_err(LayerName)
-            .and_then(|name| new_layer(layers, curr_layer, at, name).map(|_| ()))
+        Raster::new(rl, thread, 0, 0)
+            .map_err(NewLayerError::Raylib)
+            .and_then(|content| {
+                new_layer(
+                    layers,
+                    curr_layer,
+                    at,
+                    name.0,
+                    LayerContent::Raster(content),
+                )
+            })
+            .map(|_| ())
     })
 }
 
@@ -237,27 +231,67 @@ fn new_layer<'a>(
     curr_layer: &mut usize,
     at: LayerPos,
     name: String,
-) -> Result<&'a mut Layer, RunCommandError> {
-    use RunCommandError::*;
-    at.new_layer_idx(*curr_layer, layers.len())
-        .map(|pos| {
-            let new_layer = layers.insert_mut(pos, Layer::with_name(name));
-            *curr_layer = pos;
-            println!("\x1b[96mcreated layer\x1b[0m \"{}\"", new_layer.name);
-            new_layer
-        })
-        .map_err(NewLayer)
+    content: LayerContent,
+) -> Result<&'a mut Layer, NewLayerError> {
+    at.new_layer_idx(*curr_layer, layers.len()).map(|pos| {
+        let new_layer = layers.insert_mut(pos, Layer::with_name(name, content));
+        *curr_layer = pos;
+        println!("\x1b[96mcreated layer\x1b[0m \"{}\"", new_layer.name);
+        new_layer
+    })
+}
+
+fn remove_layers(
+    layers: &mut Vec<Layer>,
+    curr_layer: &mut usize,
+    mut positions: Vec<usize>,
+) -> Result<(), RemoveLayerError> {
+    use RemoveLayerError::*;
+    let mut it = 0..;
+    positions.sort();
+    positions.dedup();
+    match positions.last().copied() {
+        Some(n) => {
+            if n < layers.len() {
+                *curr_layer -= positions
+                    .iter()
+                    .copied()
+                    .take_while(|i| i <= curr_layer)
+                    .count();
+                let mut pos = positions.into_iter().peekable();
+                layers.retain(|_| pos.next_if_eq(&it.next().unwrap()).is_some());
+                Ok(())
+            } else {
+                Err(IndexOutOfBounds(n))
+            }
+        }
+        None => {
+            if layers.is_empty() {
+                assert_eq!(
+                    *curr_layer, 0,
+                    "curr_layer should always be zero if there are no layers"
+                );
+                Err(IndexOutOfBounds(0))
+            } else {
+                assert!(
+                    *curr_layer < layers.len(),
+                    "curr_layer should always be a valid index if there are layers"
+                );
+                layers.remove(*curr_layer);
+                *curr_layer = (*curr_layer).min(layers.len().saturating_sub(1));
+                Ok(())
+            }
+        }
+    }
 }
 
 fn switch_layer(
     layers: &[Layer],
     curr_layer: &mut usize,
     to: LayerPos,
-) -> Result<(), RunCommandError> {
-    use RunCommandError::*;
+) -> Result<(), SwitchLayerError> {
     to.switch_layer_idx(*curr_layer, layers.len())
         .map(|pos| *curr_layer = pos)
-        .map_err(SwitchLayer)
 }
 
 fn open(
@@ -266,7 +300,8 @@ fn open(
     layers: &mut Vec<Layer>,
     curr_layer: &mut usize,
     path: PathBuf,
-) -> Result<(), RunCommandError> {
+) -> Result<(), OpenFileError> {
+    use OpenFileError::*;
     {
         let display_path;
         println!(
@@ -283,19 +318,20 @@ fn open(
     }
 
     fs::read(&path)
-        .map_err(|e| RunCommandError::OpenFile(OpenFileError::Io(e)))
+        .map_err(Io)
         .and_then(|data| match path.extension() {
             Some(ext) if ext.eq_ignore_ascii_case("amyfx") => open_amyfx(),
             Some(ext) if ext.eq_ignore_ascii_case("png") => {
                 open_png(rl, thread, layers, curr_layer, path, &data)
             }
-            _ => Err(RunCommandError::OpenFile(OpenFileError::Unsupported)),
+            _ => Err(Unsupported),
         })
 }
 
-fn open_amyfx() -> Result<(), RunCommandError> {
+fn open_amyfx() -> Result<(), OpenFileError> {
+    use OpenFileError::*;
     println!("amyfx: not yet implemented");
-    Err(RunCommandError::OpenFile(OpenFileError::Invalid))
+    Err(Invalid)
 }
 
 fn open_png(
@@ -305,31 +341,12 @@ fn open_png(
     curr_layer: &mut usize,
     path: PathBuf,
     data: &[u8],
-) -> Result<(), RunCommandError> {
-    let rtex = Image::load_image_from_mem(".png", data)
-        .and_then(|img| {
-            let mut rtex = rl.load_render_texture(
-                thread,
-                img.width
-                    .try_into()
-                    .expect("image should not have negative width"),
-                img.height
-                    .try_into()
-                    .expect("image should not have negative height"),
-            )?;
-            assert!(img.is_image_valid(), "img should be valid");
-            assert!(
-                !img.data.is_null() && img.data.is_aligned(),
-                "img data pointer should be valid"
-            );
-            // SAFETY: this is the definition of img.data according to the Raylib source code.
-            // The only reason it isn't safe in Raylib-rs is because nobody bothered to check.
-            let pixels =
-                unsafe { std::slice::from_raw_parts(img.data.cast(), img.get_pixel_data_size()) };
-            rtex.update_texture(pixels)?;
-            Ok(rtex)
-        })
-        .map_err(OpenFileError::LoadImage)?;
+) -> Result<(), OpenFileError> {
+    use OpenFileError::*;
+
+    let raster = Image::load_image_from_mem(".png", data)
+        .and_then(|img| Raster::from_image(rl, thread, &img))
+        .map_err(LoadImage)?;
 
     new_layer(
         layers,
@@ -339,8 +356,8 @@ fn open_png(
             .expect("file should have file name")
             .to_string_lossy()
             .to_string(),
+        LayerContent::Raster(raster),
     )
-    .map(|layer| {
-        layer.content = LayerContent::Raster(rtex);
-    })
+    .map_err(NewLayer)
+    .map(|_| ())
 }

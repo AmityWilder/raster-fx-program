@@ -4,8 +4,9 @@
 use crate::{
     command::Command,
     error::{CommandError, print_err_recursive},
-    layer::{Layer, LayerContent},
+    layer::Layer,
 };
+use clap::Parser;
 use raylib::prelude::*;
 use std::{
     collections::VecDeque,
@@ -50,18 +51,35 @@ fn main() {
         match stdin_channel.try_recv() {
             Ok(input) => {
                 let input = &*history.push_back_mut(input);
-                match input
-                    .parse::<Command>()
+                // todo: make this more advanced so layer names can have spaces
+                match Command::try_parse_from(std::iter::once("").chain(input.split_whitespace()))
                     .map_err(CommandError::Parse)
                     .and_then(|cmd| {
                         cmd.run(&mut rl, &thread, &mut layers, &mut curr_layer)
                             .map_err(CommandError::Run)
                     }) {
-                    Ok(ControlFlow::Continue(())) => (),
+                    Ok(ControlFlow::Continue(())) => {}
+
                     Ok(ControlFlow::Break(())) => break 'mainloop,
+
                     Err(e) => {
-                        eprint!("\x1b[1;91merror:\x1b[0m ");
-                        print_err_recursive(&e);
+                        use clap::error::ErrorKind::*;
+                        match e {
+                            CommandError::Parse(e)
+                                if matches!(e.kind(), DisplayHelp | DisplayVersion) =>
+                            {
+                                println!("{}", e.render());
+                            }
+
+                            CommandError::Parse(e) => {
+                                println!("\x1b[1;91merror:\x1b[0m {}", e.render());
+                            }
+
+                            _ => {
+                                eprint!("\x1b[1;91merror:\x1b[0m ");
+                                print_err_recursive(&e);
+                            }
+                        }
                     }
                 }
             }
@@ -73,14 +91,8 @@ fn main() {
 
         let mut d = rl.begin_drawing(&thread);
         d.clear_background(Color::BLACK);
-        for layer in layers.iter().rev() {
-            match &layer.content {
-                LayerContent::Effect(_) => todo!(),
-                LayerContent::Raster(rtex) => {
-                    d.draw_texture(rtex, 0, 0, Color::WHITE);
-                }
-                LayerContent::Group(_) => todo!(),
-            }
+        for layer in layers.iter_mut().rev() {
+            layer.render_recursively(&mut d, &thread);
         }
     }
 }
