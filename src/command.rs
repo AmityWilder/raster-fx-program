@@ -303,16 +303,16 @@ impl Command {
 }
 
 fn list_layers(layers: &[Layer], curr_layer: usize) {
-    println!("\x1b[96mlayers: {{");
+    println!("\x1b[96mlayers: {{\x1b[0m");
     for (i, layer) in layers.iter().enumerate().rev() {
-        let (open, close) = if i == curr_layer {
-            ('[', ']')
+        let (color, open, close) = if i == curr_layer {
+            (95, '[', ']')
         } else {
-            (' ', ' ')
+            (92, ' ', ' ')
         };
-        println!("  {open}{i}{close}:\x1b[0m {}\x1b[96m", layer.name);
+        println!("  \x1b[{color}m{open}{i}{close}:\x1b[0m {}", layer.name);
     }
-    println!("}}\x1b[0m");
+    println!("\x1b[96m}}\x1b[0m");
 }
 
 fn new_raster_layer(

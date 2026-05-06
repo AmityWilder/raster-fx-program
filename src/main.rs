@@ -72,6 +72,7 @@ fn main() {
         rx
     };
     let (mut rl, thread) = init().title("Amity FX").size(1280, 720).resizable().build();
+    rl.set_trace_log(TraceLogLevel::LOG_ERROR);
 
     rl.set_target_fps(60);
 
