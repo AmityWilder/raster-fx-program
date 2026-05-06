@@ -453,7 +453,7 @@ fn open(
     {
         let display_path;
         println!(
-            "loading {:?}",
+            "path resolves to: {:?}",
             match path.canonicalize() {
                 Ok(canon_path) => {
                     display_path = canon_path;
