@@ -1,5 +1,6 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 #![warn(clippy::multiple_unsafe_ops_per_block)]
+#![warn(clippy::unwrap_used, clippy::panic, clippy::arithmetic_side_effects)]
 
 use crate::{
     command::Command,
@@ -20,23 +21,54 @@ mod command;
 mod error;
 mod layer;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct ArgsIter<'a> {
+    line: &'a str,
+}
+
+impl<'a> ArgsIter<'a> {
+    fn new(line: &'a str) -> Self {
+        Self { line }
+    }
+}
+
+impl<'a> Iterator for ArgsIter<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut res;
+        let s = self.line.trim_start();
+        (res, self.line) = if let Some(s) = s.strip_prefix('"') {
+            s.split_once('"').unwrap_or((s, ""))
+        } else {
+            s.split_at(s.find(char::is_whitespace).unwrap_or(s.len()))
+        };
+        res = res.trim_end();
+        (!res.is_empty()).then_some(res)
+    }
+}
+
+impl std::iter::FusedIterator for ArgsIter<'_> {}
+
 fn main() {
     let stdin_channel = {
         let (tx, rx) = mpsc::channel::<String>();
-        thread::spawn(move || {
-            loop {
-                let mut buffer = String::new();
-                stdin().read_line(&mut buffer).unwrap();
-                if buffer.ends_with('\n') {
-                    buffer.pop();
-                    #[cfg(windows)]
-                    if buffer.ends_with('\r') {
-                        buffer.pop();
+        thread::Builder::new()
+            .name("input".to_string())
+            .spawn(move || {
+                loop {
+                    let mut buffer = String::new();
+                    if let Err(e) = stdin().read_line(&mut buffer) {
+                        eprintln!("\x1b[1;91invalid input:\x1b[0m {e}");
+                        continue;
+                    }
+                    buffer.truncate(buffer.trim_end().len());
+                    if tx.send(buffer).is_err() {
+                        break;
                     }
                 }
-                tx.send(buffer).unwrap();
-            }
-        });
+            })
+            .expect("failed to spawn input thread");
         rx
     };
     let (mut rl, thread) = init().title("Amity FX").size(1280, 720).resizable().build();
@@ -50,35 +82,37 @@ fn main() {
     'mainloop: while !rl.window_should_close() {
         match stdin_channel.try_recv() {
             Ok(input) => {
-                let input = &*history.push_back_mut(input);
-                // todo: make this more advanced so layer names can have spaces
-                match Command::try_parse_from(std::iter::once("").chain(input.split_whitespace()))
-                    .map_err(CommandError::Parse)
-                    .and_then(|cmd| {
-                        cmd.run(&mut rl, &thread, &mut layers, &mut curr_layer)
-                            .map_err(CommandError::Run)
-                    }) {
-                    Ok(ControlFlow::Continue(())) => {}
+                'pipeline: for input in history.push_back_mut(input).split(';') {
+                    match Command::try_parse_from(std::iter::once("").chain(ArgsIter::new(input)))
+                        .map_err(CommandError::Parse)
+                        .and_then(|cmd| {
+                            cmd.run(&mut rl, &thread, &mut layers, &mut curr_layer)
+                                .map_err(CommandError::Run)
+                        }) {
+                        Ok(ControlFlow::Continue(())) => {}
 
-                    Ok(ControlFlow::Break(())) => break 'mainloop,
+                        Ok(ControlFlow::Break(())) => break 'mainloop,
 
-                    Err(e) => {
-                        use clap::error::ErrorKind::*;
-                        match e {
-                            CommandError::Parse(e)
-                                if matches!(e.kind(), DisplayHelp | DisplayVersion) =>
-                            {
-                                println!("{}", e.render());
+                        Err(e) => {
+                            use clap::error::ErrorKind::*;
+                            match e {
+                                CommandError::Parse(e)
+                                    if matches!(e.kind(), DisplayHelp | DisplayVersion) =>
+                                {
+                                    println!("{}", e.render());
+                                }
+
+                                CommandError::Parse(e) => {
+                                    println!("\x1b[1;91merror:\x1b[0m {}", e.render());
+                                }
+
+                                _ => {
+                                    eprint!("\x1b[1;91merror:\x1b[0m ");
+                                    print_err_recursive(&e);
+                                }
                             }
 
-                            CommandError::Parse(e) => {
-                                println!("\x1b[1;91merror:\x1b[0m {}", e.render());
-                            }
-
-                            _ => {
-                                eprint!("\x1b[1;91merror:\x1b[0m ");
-                                print_err_recursive(&e);
-                            }
+                            break 'pipeline;
                         }
                     }
                 }

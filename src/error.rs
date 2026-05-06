@@ -1,7 +1,22 @@
+use crate::command::ILLEGAL_LAYER_NAME_CHARS;
 use std::{error, fmt, io};
 use thiserror::Error;
 
-use crate::command::LayerName;
+/// Signed or unsigned integer
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IndexError {
+    Overflow,
+    Value(usize),
+}
+
+impl fmt::Display for IndexError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Overflow => "[overflow]".fmt(f),
+            Self::Value(n) => n.fmt(f),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Error)]
 pub enum LayerNameError {
@@ -10,7 +25,7 @@ pub enum LayerNameError {
 
     #[error(
         "layer names cannot contain any of the following characters: {:?}",
-        LayerName::ILLEGAL_CHARS
+        ILLEGAL_LAYER_NAME_CHARS
     )]
     Illegal,
 }
@@ -24,7 +39,7 @@ pub enum NewLayerError {
         "layer {} is out of bounds, must be at most equal to the number of layers",
         .0
     )]
-    IndexOutOfBounds(usize),
+    IndexOutOfBounds(IndexError),
 
     #[error("bad layer name")]
     LayerName(#[from] LayerNameError),
@@ -35,8 +50,8 @@ pub enum NewLayerError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Error)]
 pub enum SwitchLayerError {
-    #[error("layer {} is out of bounds", match .0.as_ref() { Some(idx) => idx as &dyn fmt::Display, None => const { &-1 } })]
-    IndexOutOfBounds(Option<usize>),
+    #[error("layer {} is out of bounds", .0)]
+    IndexOutOfBounds(IndexError),
 }
 
 #[derive(Debug, Error)]
@@ -57,7 +72,16 @@ pub enum OpenFileError {
     Io(#[from] io::Error),
 }
 
-#[derive(Debug, Clone, Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Error)]
+pub enum ReorderLayersError {
+    #[error("layer {} cannot be moved, because it does not exist", .0)]
+    SrcIndexOutOfBounds(IndexError),
+
+    #[error("cannot move a layer to out-of-bounds index {}", .0)]
+    DstIndexOutOfBounds(IndexError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Error)]
 pub enum RemoveLayerError {
     #[error("layer {} cannot be removed, because it does not exist", .0)]
     IndexOutOfBounds(usize),
@@ -74,10 +98,13 @@ pub enum RunCommandError {
     #[error("failed to switch layers")]
     SwitchLayer(#[from] SwitchLayerError),
 
-    #[error("failed to remove layers")]
+    #[error("failed to open file")]
     OpenFile(#[from] OpenFileError),
 
-    #[error("failed to open file")]
+    #[error("failed to reorder layers")]
+    ReorderLayers(#[from] ReorderLayersError),
+
+    #[error("failed to remove layers")]
     RemoveLayer(#[from] RemoveLayerError),
 }
 
@@ -86,7 +113,7 @@ pub enum CommandError {
     #[error("failed to parse command")]
     Parse(#[from] clap::Error),
 
-    #[error("failed to run command")]
+    #[error("failed to execute command")]
     Run(#[from] RunCommandError),
 }
 

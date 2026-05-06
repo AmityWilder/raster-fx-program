@@ -2,40 +2,34 @@ use crate::{
     error::*,
     layer::{Layer, LayerContent, Raster},
 };
-use clap::Parser;
+use clap::{Parser, ValueHint};
 use raylib::prelude::*;
 use std::{fs, ops::ControlFlow, path::PathBuf, str::FromStr};
 
-/// A string that is not allowed to be empty or contain illegal characters
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[repr(transparent)]
-pub struct LayerName(String);
+pub const ILLEGAL_LAYER_NAME_CHARS: [char; 6] = ['\n', '\r', '\t', '\\', '"', ';'];
 
-impl LayerName {
-    pub const ILLEGAL_CHARS: [char; 6] = ['\n', '\r', '\t', '\\', '"', '\''];
-}
-
-impl FromStr for LayerName {
-    type Err = LayerNameError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        use LayerNameError::*;
-        let s = s.trim();
-        if s.is_empty() {
-            Err(Empty)
-        } else if s.contains(LayerName::ILLEGAL_CHARS) {
-            Err(Illegal)
-        } else {
-            Ok(Self(s.to_string()))
-        }
+fn valid_layer_name(s: &str) -> Result<String, LayerNameError> {
+    use LayerNameError::*;
+    let s = s.trim();
+    if s.is_empty() {
+        Err(Empty)
+    } else if s.contains(ILLEGAL_LAYER_NAME_CHARS) {
+        Err(Illegal)
+    } else {
+        Ok(s.to_string())
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum LayerPos {
-    Below,
-    Above,
+    #[default]
+    Current,
+    Next,
+    Prev,
+    Front,
+    Back,
     Index(usize),
+    Offset(isize),
 }
 
 impl FromStr for LayerPos {
@@ -43,8 +37,12 @@ impl FromStr for LayerPos {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "k" => Ok(Self::Above),
-            "j" => Ok(Self::Below),
+            "" | "*" | "h" | "here" => Ok(Self::Current),
+            "k" | "]" | "n" | "next" => Ok(Self::Next),
+            "j" | "[" | "p" | "prev" => Ok(Self::Prev),
+            "]]" | "f" | "front" => Ok(Self::Front),
+            "[[" | "b" | "back" => Ok(Self::Back),
+            _ if s.starts_with(['+', '-']) => s.parse().map(Self::Offset),
             _ => s.parse().map(Self::Index),
         }
     }
@@ -58,9 +56,29 @@ impl LayerPos {
     ) -> Result<usize, NewLayerError> {
         use NewLayerError::*;
         match self {
-            LayerPos::Below => Ok(curr_layer.saturating_sub(1)),
+            Self::Current => {
+                if layer_count == 0 {
+                    assert_eq!(
+                        curr_layer, 0,
+                        "curr_layer should always be zero if there are no layers"
+                    );
+                    Ok(0)
+                } else {
+                    // ensures
+                    // 1. soundness
+                    // 2. we don't need to .min(layer_count)
+                    assert!(
+                        curr_layer < layer_count,
+                        "curr_layer should always be a valid index if there are layers"
+                    );
+                    // SAFETY: curr_layer is a usize and smaller than layer_count,
+                    // therefore adding 1 is guaranteed to be at most layer_count,
+                    // which is still a valid usize and will not overflow.
+                    Ok(curr_layer)
+                }
+            }
 
-            LayerPos::Above => {
+            Self::Next => {
                 if layer_count == usize::MAX {
                     Err(TooManyLayers)
                 } else if layer_count == 0 {
@@ -84,13 +102,30 @@ impl LayerPos {
                 }
             }
 
-            LayerPos::Index(idx) => {
+            Self::Prev => Ok(curr_layer.saturating_sub(1)),
+
+            Self::Front => Ok(layer_count.saturating_sub(1)),
+
+            Self::Back => Ok(0),
+
+            Self::Index(idx) => {
                 if idx <= layer_count {
                     Ok(idx)
                 } else {
-                    Err(IndexOutOfBounds(idx))
+                    Err(IndexOutOfBounds(IndexError::Value(idx)))
                 }
             }
+
+            Self::Offset(amnt) => curr_layer
+                .checked_add_signed(amnt)
+                .ok_or(IndexOutOfBounds(IndexError::Overflow))
+                .and_then(|idx| {
+                    if idx <= layer_count {
+                        Ok(idx)
+                    } else {
+                        Err(IndexOutOfBounds(IndexError::Value(idx)))
+                    }
+                }),
         }
     }
 
@@ -101,15 +136,29 @@ impl LayerPos {
     ) -> Result<usize, SwitchLayerError> {
         use SwitchLayerError::*;
         match self {
-            LayerPos::Below => curr_layer.checked_sub(1).ok_or(IndexOutOfBounds(None)),
-
-            LayerPos::Above => {
+            Self::Current => {
                 if layer_count == 0 {
                     assert_eq!(
                         curr_layer, 0,
                         "curr_layer should always be zero if there are no layers"
                     );
-                    Err(IndexOutOfBounds(Some(0)))
+                    Err(IndexOutOfBounds(IndexError::Value(0)))
+                } else {
+                    assert!(
+                        curr_layer < layer_count,
+                        "curr_layer should always be a valid index if there are layers"
+                    );
+                    Ok(curr_layer)
+                }
+            }
+
+            Self::Next => {
+                if layer_count == 0 {
+                    assert_eq!(
+                        curr_layer, 0,
+                        "curr_layer should always be zero if there are no layers"
+                    );
+                    Err(IndexOutOfBounds(IndexError::Value(1)))
                 } else {
                     assert!(
                         curr_layer < layer_count,
@@ -122,46 +171,105 @@ impl LayerPos {
                     if idx < layer_count {
                         Ok(idx)
                     } else {
-                        Err(IndexOutOfBounds(Some(idx)))
+                        Err(IndexOutOfBounds(IndexError::Value(idx)))
                     }
                 }
             }
 
-            LayerPos::Index(idx) => {
+            Self::Prev => curr_layer
+                .checked_sub(1)
+                .ok_or(IndexOutOfBounds(IndexError::Overflow)),
+
+            Self::Front => layer_count
+                .checked_sub(1)
+                .ok_or(IndexOutOfBounds(IndexError::Overflow)),
+
+            Self::Back => {
+                if layer_count > 0 {
+                    Ok(0)
+                } else {
+                    Err(IndexOutOfBounds(IndexError::Value(0)))
+                }
+            }
+
+            Self::Index(idx) => {
                 if idx < layer_count {
                     Ok(idx)
                 } else {
-                    Err(IndexOutOfBounds(Some(idx)))
+                    Err(IndexOutOfBounds(IndexError::Value(idx)))
                 }
             }
+
+            Self::Offset(amnt) => curr_layer
+                .checked_add_signed(amnt)
+                .ok_or(IndexOutOfBounds(IndexError::Overflow))
+                .and_then(|idx| {
+                    if idx < layer_count {
+                        Ok(idx)
+                    } else {
+                        Err(IndexOutOfBounds(IndexError::Value(idx)))
+                    }
+                }),
         }
     }
 }
 
-/// Commands
-#[derive(Debug, Clone, Parser)]
+#[derive(Parser)]
 #[command(version)]
 pub enum Command {
-    #[command(name = "ls")]
-    ListLayers {},
+    /// List the current layers in the open editor
+    #[command(name = "layers", visible_alias = "ls")]
+    ListLayers,
 
-    #[command(name = "mk")]
-    NewLayers { at: LayerPos, names: Vec<LayerName> },
+    /// Create one or more new layers
+    #[command(name = "make", visible_alias = "mk")]
+    NewLayer {
+        /// Where to put the layer
+        at: LayerPos,
 
-    #[command(name = "rm")]
+        /// The name of the layer to create
+        #[arg(value_parser = valid_layer_name)]
+        name: String,
+    },
+
+    /// Create one or more new layers
+    #[command(name = "move", visible_alias = "mv")]
+    ReorderLayer {
+        /// The layer to move
+        from: LayerPos,
+
+        /// Where to put it
+        to: LayerPos,
+    },
+
+    /// Remove one or more layers
+    #[command(name = "remove", visible_alias = "rm")]
     RemoveLayers {
-        /// empty implies current
+        /// List of layer indices to remove
+        ///
+        /// Empty implies current
         position: Vec<usize>,
     },
 
-    #[command(name = "cd")]
+    /// Change which layer is currently being targeted
+    #[command(name = "switch", visible_alias = "cd")]
     SwitchLayer { to: LayerPos },
 
-    #[command(name = "open")]
-    Open { path: PathBuf },
+    /// Open a file
+    ///
+    /// If the file is a PNG, it will be inserted into a new layer above the current one
+    ///
+    /// If it is an AmyFX file, the current file will be closed and the provided one will open
+    #[command(name = "open", visible_alias = "o")]
+    Open {
+        /// Path to the file to open
+        #[arg(value_hint = ValueHint::FilePath)]
+        path: PathBuf,
+    },
 
-    #[command(name = "quit")]
-    Quit {},
+    /// Close the application
+    #[command(name = "quit", visible_alias = "q")]
+    Quit,
 }
 
 impl Command {
@@ -175,7 +283,12 @@ impl Command {
         use RunCommandError::*;
         match self {
             Self::ListLayers {} => list_layers(layers, *curr_layer),
-            Self::NewLayers { at, names } => new_layers(rl, thread, layers, curr_layer, at, names)?,
+            Self::NewLayer { at, name } => {
+                new_raster_layer(rl, thread, layers, curr_layer, at, name)?
+            }
+            Self::ReorderLayer { from, to } => {
+                reorder_layers(layers, curr_layer, from, to).map_err(ReorderLayers)?
+            }
             Self::RemoveLayers { position } => {
                 remove_layers(layers, curr_layer, position).map_err(RemoveLayer)?
             }
@@ -202,28 +315,21 @@ fn list_layers(layers: &[Layer], curr_layer: usize) {
     println!("}}\x1b[0m");
 }
 
-fn new_layers(
+fn new_raster_layer(
     rl: &mut RaylibHandle,
     thread: &RaylibThread,
     layers: &mut Vec<Layer>,
     curr_layer: &mut usize,
-    at: LayerPos,
-    names: Vec<LayerName>,
+    mut at: LayerPos,
+    name: String,
 ) -> Result<(), NewLayerError> {
-    names.into_iter().try_for_each(|name| {
-        Raster::new(rl, thread, 0, 0)
-            .map_err(NewLayerError::Raylib)
-            .and_then(|content| {
-                new_layer(
-                    layers,
-                    curr_layer,
-                    at,
-                    name.0,
-                    LayerContent::Raster(content),
-                )
-            })
-            .map(|_| ())
-    })
+    Raster::new(rl, thread, 0, 0)
+        .map_err(NewLayerError::Raylib)
+        .and_then(|content| {
+            new_layer(layers, curr_layer, at, name, LayerContent::Raster(content))?;
+            at = LayerPos::Next;
+            Ok(())
+        })
 }
 
 fn new_layer<'a>(
@@ -241,25 +347,67 @@ fn new_layer<'a>(
     })
 }
 
+fn reorder_layers(
+    layers: &mut [Layer],
+    curr_layer: &mut usize,
+    from: LayerPos,
+    to: LayerPos,
+) -> Result<(), ReorderLayersError> {
+    use ReorderLayersError::*;
+    use std::cmp::Ordering::*;
+    let from = from
+        .switch_layer_idx(*curr_layer, layers.len())
+        .map_err(|e| {
+            use SwitchLayerError::*;
+            match e {
+                IndexOutOfBounds(idx) => SrcIndexOutOfBounds(idx),
+            }
+        })?;
+    let to = to
+        .switch_layer_idx(*curr_layer, layers.len())
+        .map_err(|e| {
+            use SwitchLayerError::*;
+            match e {
+                IndexOutOfBounds(idx) => DstIndexOutOfBounds(idx),
+            }
+        })?;
+    match from.cmp(&to) {
+        Less => layers[from..to].rotate_left(1),
+        Equal => {
+            println!("\x1b[1;95mwarning:\x1b[0m layer order unchanged");
+        }
+        Greater => layers[to..from].rotate_right(1),
+    }
+    Ok(())
+}
+
 fn remove_layers(
     layers: &mut Vec<Layer>,
     curr_layer: &mut usize,
     mut positions: Vec<usize>,
 ) -> Result<(), RemoveLayerError> {
     use RemoveLayerError::*;
-    let mut it = 0..;
     positions.sort();
     positions.dedup();
     match positions.last().copied() {
         Some(n) => {
             if n < layers.len() {
-                *curr_layer -= positions
-                    .iter()
-                    .copied()
-                    .take_while(|i| i <= curr_layer)
-                    .count();
+                let mut layer_index = 0..layers.len();
+                *curr_layer = (*curr_layer).saturating_sub(
+                    positions
+                        .iter()
+                        .copied()
+                        .take_while(|i| i <= curr_layer)
+                        .count(),
+                );
                 let mut pos = positions.into_iter().peekable();
-                layers.retain(|_| pos.next_if_eq(&it.next().unwrap()).is_some());
+                layers.retain(|layer| {
+                    // SAFETY: positions cannot be negative, duplicative, or exceed the maximum layer index.
+                    // there cannot be more positions than layers.
+                    pos.next_if_eq(&unsafe { layer_index.next().unwrap_unchecked() })
+                        .inspect(|_| println!("\x1b[96mremoving\x1b[0m {}", layer.name))
+                        .is_some()
+                });
                 Ok(())
             } else {
                 Err(IndexOutOfBounds(n))
@@ -351,7 +499,7 @@ fn open_png(
     new_layer(
         layers,
         curr_layer,
-        LayerPos::Above,
+        LayerPos::Next,
         path.file_name()
             .expect("file should have file name")
             .to_string_lossy()
