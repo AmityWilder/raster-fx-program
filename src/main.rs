@@ -1,9 +1,10 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
+#![warn(clippy::multiple_unsafe_ops_per_block)]
 
 use crate::{
     command::Command,
     error::{CommandError, print_err_recursive},
-    layer::Layer,
+    layer::{Layer, LayerContent},
 };
 use raylib::prelude::*;
 use std::{
@@ -53,7 +54,7 @@ fn main() {
                     .parse::<Command>()
                     .map_err(CommandError::Parse)
                     .and_then(|cmd| {
-                        cmd.run(&mut layers, &mut curr_layer)
+                        cmd.run(&mut rl, &thread, &mut layers, &mut curr_layer)
                             .map_err(CommandError::Run)
                     }) {
                     Ok(ControlFlow::Continue(())) => (),
@@ -69,7 +70,17 @@ fn main() {
                 break 'mainloop;
             }
         }
+
         let mut d = rl.begin_drawing(&thread);
         d.clear_background(Color::BLACK);
+        for layer in layers.iter().rev() {
+            match &layer.content {
+                LayerContent::Effect(_) => todo!(),
+                LayerContent::Raster(rtex) => {
+                    d.draw_texture(rtex, 0, 0, Color::WHITE);
+                }
+                LayerContent::Group(_) => todo!(),
+            }
+        }
     }
 }

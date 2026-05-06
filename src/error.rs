@@ -113,6 +113,7 @@ impl error::Error for ParseCommandError {
 pub enum OpenFileError {
     Invalid,
     Unsupported,
+    LoadImage(raylib::error::Error),
     Io(io::Error),
 }
 
@@ -127,6 +128,7 @@ impl fmt::Display for OpenFileError {
         match self {
             Self::Invalid => "invalid or corrupted file",
             Self::Unsupported => "unsupported file format",
+            Self::LoadImage(_) => "failed to load image file",
             Self::Io(_) => "IO system error",
         }
         .fmt(f)
@@ -136,6 +138,7 @@ impl fmt::Display for OpenFileError {
 impl error::Error for OpenFileError {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
+            Self::LoadImage(e) => Some(e),
             Self::Io(e) => Some(e),
             _ => None,
         }
