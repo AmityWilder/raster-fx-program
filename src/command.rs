@@ -372,11 +372,11 @@ fn reorder_layers(
             }
         })?;
     match from.cmp(&to) {
-        Less => layers[from..to].rotate_left(1),
+        Less => layers[from..=to].rotate_left(1),
         Equal => {
             println!("\x1b[1;95mwarning:\x1b[0m layer order unchanged");
         }
-        Greater => layers[to..from].rotate_right(1),
+        Greater => layers[to..=from].rotate_right(1),
     }
     Ok(())
 }
