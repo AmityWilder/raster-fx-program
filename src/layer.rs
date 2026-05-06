@@ -73,8 +73,29 @@ impl Raster {
             let pixels = unsafe {
                 std::slice::from_raw_parts(image.data.cast(), image.get_pixel_data_size())
             };
-            raster.rtex.update_texture(pixels)?;
-            Ok(raster)
+            raster
+                .rtex
+                .update_texture(pixels)
+                .or_else(|_| {
+                    let texture = rl.load_texture_from_image(thread, image)?;
+                    let mut d = rl.begin_texture_mode(thread, &mut raster.rtex);
+                    d.clear_background(Color::BLANK);
+                    d.draw_texture_pro(
+                        &texture,
+                        Rectangle::new(
+                            0.0,
+                            texture.height as f32,
+                            texture.width as f32,
+                            -(texture.height as f32),
+                        ),
+                        Rectangle::new(0.0, 0.0, texture.width as f32, texture.height as f32),
+                        Vector2::zero(),
+                        0.0,
+                        Color::WHITE,
+                    );
+                    Ok(())
+                })
+                .map(|()| raster)
         })
     }
 
