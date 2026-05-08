@@ -1,6 +1,7 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 #![warn(clippy::multiple_unsafe_ops_per_block)]
 #![warn(clippy::unwrap_used, clippy::panic, clippy::arithmetic_side_effects)]
+#![warn(clippy::missing_const_for_fn)]
 
 use crate::{
     command::{Command, CommandError},
@@ -38,7 +39,7 @@ pub struct ArgsIter<'a> {
 }
 
 impl<'a> ArgsIter<'a> {
-    fn new(line: &'a str) -> Self {
+    const fn new(line: &'a str) -> Self {
         Self { line }
     }
 }

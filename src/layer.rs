@@ -162,17 +162,78 @@ impl EffectBuilder {
 }
 
 trait EffectSlice {
-    fn apply(&mut self, d: &mut impl RaylibDraw, texture: impl AsRef<ffi::Texture2D>, tint: Color);
+    fn apply(
+        &mut self,
+        d: &mut impl RaylibDraw,
+        texture: &impl RaylibTexture2D,
+        tint: Color,
+        transform: &Matrix,
+    );
+}
+
+fn draw_texture_quad(
+    _d: &mut impl RaylibDraw,
+    texture: &impl RaylibTexture2D,
+    mat: Matrix,
+    tint: Color,
+) {
+    if !texture.is_texture_valid() {
+        return;
+    }
+    let texture = texture.as_ref();
+    let (width, height) = (texture.width as f32, texture.height as f32);
+    let [tl, tr, bl, br] = [
+        Vector3::new(0.0, 0.0, 0.0).transform_with(mat),
+        Vector3::new(width, 0.0, 0.0).transform_with(mat),
+        Vector3::new(0.0, height, 0.0).transform_with(mat),
+        Vector3::new(width, height, 0.0).transform_with(mat),
+    ]
+    .map(|Vector3 { x, y, z: _ }| Vector2 { x, y });
+
+    // SAFETY: based on DrawTexturePro
+    #[allow(clippy::multiple_unsafe_ops_per_block)]
+    unsafe {
+        ffi::rlSetTexture(texture.id);
+        ffi::rlBegin(ffi::RL_QUADS as i32);
+
+        ffi::rlColor4ub(tint.r, tint.g, tint.b, tint.a);
+        ffi::rlNormal3f(0.0, 0.0, 1.0); // Normal vector pointing towards viewer
+
+        // Top-left corner for texture and quad
+        ffi::rlTexCoord2f(0.0, 0.0);
+        ffi::rlVertex2f(tl.x, tl.y);
+
+        // Bottom-left corner for texture and quad
+        ffi::rlTexCoord2f(0.0, 1.0);
+        ffi::rlVertex2f(bl.x, bl.y);
+
+        // Bottom-right corner for texture and quad
+        ffi::rlTexCoord2f(1.0, 1.0);
+        ffi::rlVertex2f(br.x, br.y);
+
+        // Top-right corner for texture and quad
+        ffi::rlTexCoord2f(1.0, 0.0);
+        ffi::rlVertex2f(tr.x, tr.y);
+
+        ffi::rlEnd();
+        ffi::rlSetTexture(0);
+    }
 }
 
 impl EffectSlice for [Effect] {
-    fn apply(&mut self, d: &mut impl RaylibDraw, texture: impl AsRef<ffi::Texture2D>, tint: Color) {
+    fn apply(
+        &mut self,
+        d: &mut impl RaylibDraw,
+        texture: &impl RaylibTexture2D,
+        tint: Color,
+        transform: &Matrix,
+    ) {
         if let [first, rest @ ..] = self {
             let mut _mode = ShaderMode::begin(&mut first.shader);
-            rest.apply(d, texture, tint);
+            rest.apply(d, texture, tint, transform);
         } else {
             // empty
-            d.draw_texture(texture, 0, 0, tint);
+            draw_texture_quad(d, texture, *transform, tint)
         }
     }
 }
@@ -186,7 +247,7 @@ enum LayerContent {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Blending {
     pub mode: BlendMode,
     pub tint: Color,
@@ -218,6 +279,7 @@ pub struct Layer {
     content: LayerContent,
     pub effects: Vec<Effect>,
     pub blend: Blending,
+    pub transform: Matrix,
 }
 
 impl Layer {
@@ -229,6 +291,24 @@ impl Layer {
             content,
             effects: Vec::new(),
             blend: Blending::new(),
+            transform: Matrix {
+                m0: 1.0,
+                m4: 0.0,
+                m8: 0.0,
+                m12: 0.0,
+                m1: 0.0,
+                m5: 1.0,
+                m9: 0.0,
+                m13: 0.0,
+                m2: 0.0,
+                m6: 0.0,
+                m10: 1.0,
+                m14: 0.0,
+                m3: 0.0,
+                m7: 0.0,
+                m11: 0.0,
+                m15: 1.0,
+            },
         }
     }
 
@@ -247,7 +327,7 @@ impl Layer {
     }
 
     /// Returns [`Some`] for groups and [`None`] otherwise
-    pub fn children(&self) -> Option<&Vec<Layer>> {
+    pub const fn children(&self) -> Option<&Vec<Layer>> {
         match &self.content {
             LayerContent::Raster => None,
             LayerContent::Group { children } => Some(children),
@@ -257,7 +337,7 @@ impl Layer {
     /// Returns [`Some`] for groups and [`None`] otherwise
     ///
     /// Assumes children will be modified and marks the group as dirty
-    pub fn children_mut(&mut self) -> Option<&mut Vec<Layer>> {
+    pub const fn children_mut(&mut self) -> Option<&mut Vec<Layer>> {
         match &mut self.content {
             LayerContent::Raster => None,
             LayerContent::Group { children } => {
@@ -268,7 +348,7 @@ impl Layer {
     }
 
     /// Returns [`Some`] for rasters and [`None`] otherwise
-    pub fn buffer(&self) -> Option<&RenderTexture2D> {
+    pub const fn buffer(&self) -> Option<&RenderTexture2D> {
         match &self.content {
             LayerContent::Raster => Some(&self.buffer),
             LayerContent::Group { .. } => None,
@@ -278,7 +358,7 @@ impl Layer {
     /// Returns [`Some`] for rasters and [`None`] otherwise
     ///
     /// Assumes buffer will be modified and marks the raster as dirty
-    pub fn buffer_mut(&mut self) -> Option<&mut RenderTexture2D> {
+    pub const fn buffer_mut(&mut self) -> Option<&mut RenderTexture2D> {
         match &mut self.content {
             LayerContent::Raster => {
                 self.is_dirty = true;
@@ -314,6 +394,6 @@ impl Layer {
         let _mode = BlendingMode::begin(&mut self.blend.mode);
         self.effects
             .as_mut_slice()
-            .apply(d, &self.buffer, self.blend.tint);
+            .apply(d, &self.buffer, self.blend.tint, &self.transform);
     }
 }
