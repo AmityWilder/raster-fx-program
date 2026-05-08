@@ -142,7 +142,7 @@ fn main() {
         let mut d = rl.begin_drawing(&thread);
         d.clear_background(Color::BLACK);
         for layer in layers.iter_mut() {
-            layer.draw_buffer(&mut d);
+            layer.draw_buffer(&mut d, Matrix::identity());
         }
     }
 }

@@ -383,17 +383,21 @@ impl Layer {
                 let mut d = rl.begin_texture_mode(thread, &mut self.buffer);
                 d.clear_background(Color::BLANK);
                 for child in children.iter_mut().rev() {
-                    child.draw_buffer(&mut d);
+                    child.draw_buffer(&mut d, self.transform);
                 }
             }
         }
         is_updated
     }
 
-    pub fn draw_buffer(&mut self, d: &mut impl RaylibDraw) {
+    pub fn draw_buffer(&mut self, d: &mut impl RaylibDraw, transform: Matrix) {
         let _mode = BlendingMode::begin(&mut self.blend.mode);
-        self.effects
-            .as_mut_slice()
-            .apply(d, &self.buffer, self.blend.tint, &self.transform);
+        self.effects.as_mut_slice().apply(
+            d,
+            &self.buffer,
+            self.blend.tint,
+            #[allow(clippy::arithmetic_side_effects)]
+            &(transform * self.transform),
+        );
     }
 }
