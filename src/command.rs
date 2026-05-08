@@ -1,6 +1,6 @@
 use crate::{
     error::*,
-    layer::{Layer, LayerContent, Raster},
+    layer::{Layer, rtex_from_image},
 };
 use clap::{Parser, ValueHint};
 use raylib::prelude::*;
@@ -323,10 +323,10 @@ fn new_raster_layer(
     mut at: LayerPos,
     name: String,
 ) -> Result<(), NewLayerError> {
-    Raster::new(rl, thread, 0, 0)
+    rl.load_render_texture(thread, 0, 0)
         .map_err(NewLayerError::Raylib)
-        .and_then(|content| {
-            new_layer(layers, curr_layer, at, name, LayerContent::Raster(content))?;
+        .and_then(|buffer| {
+            new_layer(layers, curr_layer, at, name, buffer)?;
             at = LayerPos::Next;
             Ok(())
         })
@@ -337,10 +337,10 @@ fn new_layer<'a>(
     curr_layer: &mut usize,
     at: LayerPos,
     name: String,
-    content: LayerContent,
+    buffer: RenderTexture2D,
 ) -> Result<&'a mut Layer, NewLayerError> {
     at.new_layer_idx(*curr_layer, layers.len()).map(|pos| {
-        let new_layer = layers.insert_mut(pos, Layer::with_name(name, content));
+        let new_layer = layers.insert_mut(pos, Layer::new_raster(name, buffer));
         *curr_layer = pos;
         println!("\x1b[96mcreated layer\x1b[0m \"{}\"", new_layer.name);
         new_layer
@@ -492,8 +492,8 @@ fn open_png(
 ) -> Result<(), OpenFileError> {
     use OpenFileError::*;
 
-    let raster = Image::load_image_from_mem(".png", data)
-        .and_then(|img| Raster::from_image(rl, thread, &img))
+    let buffer = Image::load_image_from_mem(".png", data)
+        .and_then(|img| rtex_from_image(rl, thread, &img))
         .map_err(LoadImage)?;
 
     new_layer(
@@ -504,7 +504,7 @@ fn open_png(
             .expect("file should have file name")
             .to_string_lossy()
             .to_string(),
-        LayerContent::Raster(raster),
+        buffer,
     )
     .map_err(NewLayer)
     .map(|_| ())

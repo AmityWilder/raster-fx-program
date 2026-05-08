@@ -127,7 +127,7 @@ fn main() {
         let mut d = rl.begin_drawing(&thread);
         d.clear_background(Color::BLACK);
         for layer in layers.iter_mut().rev() {
-            layer.render_recursively(&mut d, &thread);
+            layer.draw(&mut d, &thread);
         }
     }
 }
