@@ -124,10 +124,13 @@ fn main() {
             }
         }
 
+        for layer in layers.iter_mut() {
+            layer.prep_buffer_recursively(&mut rl, &thread);
+        }
         let mut d = rl.begin_drawing(&thread);
         d.clear_background(Color::BLACK);
         for layer in layers.iter_mut().rev() {
-            layer.draw(&mut d, &thread);
+            layer.draw_buffer(&mut d);
         }
     }
 }

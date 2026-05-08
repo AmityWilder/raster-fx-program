@@ -219,7 +219,10 @@ impl LayerPos {
 pub enum Command {
     /// List the current layers in the open editor
     #[command(name = "layers", visible_alias = "ls")]
-    ListLayers,
+    ListLayers {
+        #[arg(short, long, action = clap::ArgAction::SetTrue)]
+        dbg: bool,
+    },
 
     /// Create one or more new layers
     #[command(name = "make", visible_alias = "mk")]
@@ -282,7 +285,7 @@ impl Command {
     ) -> Result<ControlFlow<()>, RunCommandError> {
         use RunCommandError::*;
         match self {
-            Self::ListLayers {} => list_layers(layers, *curr_layer),
+            Self::ListLayers { dbg } => list_layers(layers, *curr_layer, dbg),
             Self::NewLayer { at, name } => {
                 new_raster_layer(rl, thread, layers, curr_layer, at, name)?
             }
@@ -302,7 +305,7 @@ impl Command {
     }
 }
 
-fn list_layers(layers: &[Layer], curr_layer: usize) {
+fn list_layers(layers: &[Layer], curr_layer: usize, debug: bool) {
     println!("\x1b[96mlayers: {{\x1b[0m");
     for (i, layer) in layers.iter().enumerate().rev() {
         let (color, open, close) = if i == curr_layer {
@@ -310,7 +313,12 @@ fn list_layers(layers: &[Layer], curr_layer: usize) {
         } else {
             (92, ' ', ' ')
         };
-        println!("  \x1b[{color}m{open}{i}{close}:\x1b[0m {}", layer.name);
+        print!("  \x1b[{color}m{open}{i}{close}:\x1b[0m ");
+        if debug {
+            println!("{layer:#?}");
+        } else {
+            println!("{}", layer.name);
+        }
     }
     println!("\x1b[96m}}\x1b[0m");
 }

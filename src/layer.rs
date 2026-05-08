@@ -1,25 +1,5 @@
 use raylib::prelude::*;
 
-pub trait AsRaylibHandle {
-    fn as_rl(&mut self) -> &mut RaylibHandle;
-}
-
-impl AsRaylibHandle for RaylibHandle {
-    fn as_rl(&mut self) -> &mut RaylibHandle {
-        self
-    }
-}
-impl AsRaylibHandle for RaylibDrawHandle<'_> {
-    fn as_rl(&mut self) -> &mut RaylibHandle {
-        self
-    }
-}
-impl<T: AsRaylibHandle> AsRaylibHandle for RaylibTextureMode<'_, T> {
-    fn as_rl(&mut self) -> &mut RaylibHandle {
-        (**self).as_rl()
-    }
-}
-
 pub fn rtex_from_image(
     rl: &mut RaylibHandle,
     thread: &RaylibThread,
@@ -81,12 +61,60 @@ trait EffectSlice {
     fn apply(&mut self, d: &mut impl RaylibDraw, texture: impl AsRef<ffi::Texture2D>);
 }
 
+struct ShaderMode<'a>(&'a mut Shader);
+
+impl<'a> ShaderMode<'a> {
+    fn begin(shader: &'a mut Shader) -> Self {
+        // SAFETY: TBD
+        unsafe {
+            ffi::BeginShaderMode(*shader.as_ref());
+        }
+        Self(shader)
+    }
+}
+
+impl Drop for ShaderMode<'_> {
+    fn drop(&mut self) {
+        // SAFETY: TBD
+        unsafe {
+            ffi::EndShaderMode();
+        }
+    }
+}
+
+struct BlendingMode<'a>(&'a mut BlendMode);
+
+impl<'a> BlendingMode<'a> {
+    fn begin(mode: &'a mut BlendMode) -> Self {
+        // SAFETY: TBD
+        unsafe {
+            ffi::BeginBlendMode(*mode as i32);
+        }
+        Self(mode)
+    }
+}
+
+impl Drop for BlendingMode<'_> {
+    fn drop(&mut self) {
+        // SAFETY: TBD
+        unsafe {
+            ffi::EndBlendMode();
+        }
+    }
+}
+
 impl EffectSlice for [Effect] {
     fn apply(&mut self, d: &mut impl RaylibDraw, texture: impl AsRef<ffi::Texture2D>) {
         if let [first, rest @ ..] = self {
             match first {
-                Effect::Shader(shader) => rest.apply(&mut d.begin_shader_mode(shader), texture),
-                Effect::BlendMode(mode) => rest.apply(&mut d.begin_blend_mode(*mode), texture),
+                Effect::Shader(shader) => {
+                    let mut _mode = ShaderMode::begin(shader);
+                    rest.apply(d, texture);
+                }
+                Effect::BlendMode(mode) => {
+                    let mut _mode = BlendingMode::begin(mode);
+                    rest.apply(d, texture);
+                }
             }
         } else {
             // empty
@@ -97,8 +125,11 @@ impl EffectSlice for [Effect] {
 
 #[derive(Debug)]
 enum LayerContent {
-    Raster { is_dirty: bool },
-    Group { children: Vec<Layer> },
+    Raster,
+    Group {
+        /// A group may be empty, but still distinct from a raster
+        children: Vec<Layer>,
+    },
 }
 
 #[derive(Debug)]
@@ -106,6 +137,9 @@ pub struct Layer {
     pub name: String,
     /// private on groups, accessible on rasters
     buffer: RenderTexture2D,
+    /// rasters: the buffer has changed, making containing group buffers out of date
+    /// groups: the number or order of children has changed, making the buffer out of date in a way the children cannot express
+    is_dirty: bool,
     content: LayerContent,
     pub effects: Vec<Effect>,
 }
@@ -115,7 +149,8 @@ impl Layer {
         Self {
             name,
             buffer,
-            content: LayerContent::Raster { is_dirty: true },
+            is_dirty: true,
+            content: LayerContent::Raster,
             effects: Vec::new(),
         }
     }
@@ -124,6 +159,7 @@ impl Layer {
         Self {
             name,
             buffer,
+            is_dirty: true,
             content: LayerContent::Group {
                 children: Vec::new(),
             },
@@ -131,80 +167,71 @@ impl Layer {
         }
     }
 
-    /// Returns [`None`] for rasters
+    /// Returns [`Some`] for groups and [`None`] otherwise
     pub fn children(&self) -> Option<&Vec<Layer>> {
         match &self.content {
-            LayerContent::Raster { .. } => None,
+            LayerContent::Raster => None,
             LayerContent::Group { children } => Some(children),
         }
     }
 
-    /// Returns [`None`] for rasters
+    /// Returns [`Some`] for groups and [`None`] otherwise
+    ///
+    /// Assumes children will be modified and marks the group as dirty
     pub fn children_mut(&mut self) -> Option<&mut Vec<Layer>> {
         match &mut self.content {
-            LayerContent::Raster { .. } => None,
-            LayerContent::Group { children } => Some(children),
+            LayerContent::Raster => None,
+            LayerContent::Group { children } => {
+                self.is_dirty = true;
+                Some(children)
+            }
         }
     }
 
-    /// Returns [`None`] for groups
+    /// Returns [`Some`] for rasters and [`None`] otherwise
     pub fn buffer(&self) -> Option<&RenderTexture2D> {
         match &self.content {
-            LayerContent::Raster { .. } => Some(&self.buffer),
+            LayerContent::Raster => Some(&self.buffer),
             LayerContent::Group { .. } => None,
         }
     }
 
-    /// Returns [`None`] for groups
+    /// Returns [`Some`] for rasters and [`None`] otherwise
     ///
-    /// Assumes buffer will be modified and marks it as dirty
+    /// Assumes buffer will be modified and marks the raster as dirty
     pub fn buffer_mut(&mut self) -> Option<&mut RenderTexture2D> {
         match &mut self.content {
-            LayerContent::Raster { is_dirty } => {
-                *is_dirty = true;
+            LayerContent::Raster => {
+                self.is_dirty = true;
                 Some(&mut self.buffer)
             }
             LayerContent::Group { .. } => None,
         }
     }
 
-    fn draw_buffered<D>(&mut self, d: &mut D)
-    where
-        D: RaylibDraw,
-    {
-        self.effects.as_mut_slice().apply(d, &self.buffer);
-    }
-
-    fn prep_buffer_recursively<D>(&mut self, d: &mut D, thread: &RaylibThread) -> bool
-    where
-        D: RaylibDraw + AsRaylibHandle,
-    {
-        match &mut self.content {
-            LayerContent::Raster { is_dirty } => std::mem::take(is_dirty),
-
-            LayerContent::Group { children } => {
-                let mut any_updated = false;
-                // cannot be represented as "any" because all must be visited
-                for child in children.iter_mut() {
-                    any_updated |= child.prep_buffer_recursively(d, thread);
+    pub fn prep_buffer_recursively(
+        &mut self,
+        rl: &mut RaylibHandle,
+        thread: &RaylibThread,
+    ) -> bool {
+        let mut is_updated = std::mem::take(&mut self.is_dirty);
+        if let LayerContent::Group { children } = &mut self.content {
+            // cannot be represented as "any()" because all must be visited to prep them
+            for child in children.iter_mut() {
+                is_updated |= child.prep_buffer_recursively(rl, thread);
+            }
+            if is_updated {
+                let mut d = rl.begin_texture_mode(thread, &mut self.buffer);
+                d.clear_background(Color::BLANK);
+                for child in children.iter_mut().rev() {
+                    child.draw_buffer(&mut d);
                 }
-                if any_updated {
-                    let mut d = d.as_rl().begin_texture_mode(thread, &mut self.buffer);
-                    d.clear_background(Color::BLANK);
-                    for child in children.iter_mut().rev() {
-                        child.draw_buffered(&mut d);
-                    }
-                }
-                any_updated
             }
         }
+        is_updated
     }
 
-    pub fn draw<D>(&mut self, d: &mut D, thread: &RaylibThread)
-    where
-        D: RaylibDraw + AsRaylibHandle,
-    {
-        if self.prep_buffer_recursively(d, thread) {}
-        self.draw_buffered(d);
+    pub fn draw_buffer(&mut self, d: &mut impl RaylibDraw) {
+        self.effects.as_mut_slice().apply(d, &self.buffer);
     }
 }
