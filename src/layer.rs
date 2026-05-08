@@ -1,6 +1,6 @@
 use clap::Args;
 use raylib::prelude::*;
-use std::{fs, path::PathBuf};
+use std::{fs, marker::PhantomData, path::PathBuf};
 
 pub fn rtex_from_image(
     rl: &mut RaylibHandle,
@@ -53,7 +53,7 @@ pub fn rtex_from_image(
     })
 }
 
-struct ShaderMode<'a>(&'a mut Shader);
+struct ShaderMode<'a>(PhantomData<&'a mut Shader>);
 
 impl<'a> ShaderMode<'a> {
     fn begin(shader: &'a mut Shader) -> Self {
@@ -61,7 +61,7 @@ impl<'a> ShaderMode<'a> {
         unsafe {
             ffi::BeginShaderMode(*shader.as_ref());
         }
-        Self(shader)
+        Self(PhantomData)
     }
 }
 
@@ -74,7 +74,7 @@ impl Drop for ShaderMode<'_> {
     }
 }
 
-struct BlendingMode<'a>(&'a mut BlendMode);
+struct BlendingMode<'a>(PhantomData<&'a mut BlendMode>);
 
 impl<'a> BlendingMode<'a> {
     fn begin(mode: &'a mut BlendMode) -> Self {
@@ -82,7 +82,7 @@ impl<'a> BlendingMode<'a> {
         unsafe {
             ffi::BeginBlendMode(*mode as i32);
         }
-        Self(mode)
+        Self(PhantomData)
     }
 }
 
@@ -96,41 +96,66 @@ impl Drop for BlendingMode<'_> {
 }
 
 #[derive(Debug)]
-pub struct Effect(Shader);
+pub struct Effect {
+    builder: EffectBuilder,
+    pub shader: Shader,
+}
+
+impl Effect {
+    pub fn reload(
+        &mut self,
+        rl: &mut RaylibHandle,
+        thread: &RaylibThread,
+    ) -> Result<(), std::io::Error> {
+        self.shader = self.builder.load_shader(rl, thread)?;
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Args)]
 pub struct EffectBuilder {
     /// Path to the vertex shader code file
-    pub vs_path: Option<PathBuf>,
+    vs_path: Option<PathBuf>,
 
     /// Path to the fragment shader code file
-    pub fs_path: Option<PathBuf>,
+    fs_path: Option<PathBuf>,
 }
 
 impl EffectBuilder {
-    pub fn build(
-        self,
+    fn load_shader(
+        &self,
         rl: &mut RaylibHandle,
         thread: &RaylibThread,
-    ) -> Result<Effect, std::io::Error> {
+    ) -> Result<Shader, std::io::Error> {
         let (vs_code, fs_code);
-        Ok(Effect(rl.load_shader_from_memory(
+        Ok(rl.load_shader_from_memory(
             thread,
-            match self.vs_path {
+            match &self.vs_path {
                 Some(path) => {
                     vs_code = fs::read_to_string(path)?;
                     Some(vs_code.as_str())
                 }
                 None => None,
             },
-            match self.fs_path {
+            match &self.fs_path {
                 Some(path) => {
                     fs_code = fs::read_to_string(path)?;
                     Some(fs_code.as_str())
                 }
                 None => None,
             },
-        )))
+        ))
+    }
+
+    pub fn build(
+        self,
+        rl: &mut RaylibHandle,
+        thread: &RaylibThread,
+    ) -> Result<Effect, std::io::Error> {
+        self.load_shader(rl, thread).map(|shader| Effect {
+            builder: self,
+            shader,
+        })
     }
 }
 
@@ -141,7 +166,7 @@ trait EffectSlice {
 impl EffectSlice for [Effect] {
     fn apply(&mut self, d: &mut impl RaylibDraw, texture: impl AsRef<ffi::Texture2D>, tint: Color) {
         if let [first, rest @ ..] = self {
-            let mut _mode = ShaderMode::begin(&mut first.0);
+            let mut _mode = ShaderMode::begin(&mut first.shader);
             rest.apply(d, texture, tint);
         } else {
             // empty

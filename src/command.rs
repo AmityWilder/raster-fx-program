@@ -1,10 +1,8 @@
-use crate::{
-    error::*,
-    layer::{Effect, EffectBuilder, Layer, rtex_from_image},
-};
+use crate::layer::{Effect, EffectBuilder, Layer, rtex_from_image};
 use clap::{Parser, ValueHint};
 use raylib::prelude::*;
-use std::{fs, ops::ControlFlow, path::PathBuf, str::FromStr};
+use std::{fmt, fs, io, ops::ControlFlow, path::PathBuf, str::FromStr};
+use thiserror::Error;
 
 pub const ILLEGAL_LAYER_NAME_CHARS: [char; 6] = ['\n', '\r', '\t', '\\', '"', ';'];
 
@@ -37,7 +35,7 @@ impl FromStr for LayerPos {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "" | "*" | "h" | "here" => Ok(Self::Current),
+            "*" | "h" | "here" => Ok(Self::Current),
             "k" | "]" | "n" | "next" => Ok(Self::Next),
             "j" | "[" | "p" | "prev" => Ok(Self::Prev),
             "]]" | "f" | "front" => Ok(Self::Front),
@@ -46,6 +44,37 @@ impl FromStr for LayerPos {
             _ => s.parse().map(Self::Index),
         }
     }
+}
+
+/// Signed or unsigned integer
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IndexError {
+    Overflow,
+    Value(usize),
+}
+
+impl fmt::Display for IndexError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Overflow => "[overflow]".fmt(f),
+            Self::Value(n) => n.fmt(f),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Error)]
+pub enum InsertLayerError {
+    #[error("cannot exceed {} layers on a {}-bit system", const { usize::MAX }, const { std::mem::size_of::<usize>() * 8 })]
+    TooManyLayers,
+
+    #[error("layer position {} is out of bounds, cannot exceed the number of layers", .0)]
+    IndexOutOfBounds(IndexError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Error)]
+pub enum SelectLayerError {
+    #[error("layer {} does not exist", .0)]
+    IndexOutOfBounds(IndexError),
 }
 
 impl LayerPos {
@@ -233,6 +262,9 @@ pub enum Command {
         /// The name of the layer to create
         #[arg(value_parser = valid_layer_name)]
         name: String,
+
+        #[arg(short = 'g', long = "group", action = clap::ArgAction::SetTrue)]
+        is_group: bool,
     },
 
     /// Apply an effect to a layer
@@ -244,6 +276,13 @@ pub enum Command {
         /// The DNA of the effect to add
         #[command(flatten)]
         effect: EffectBuilder,
+    },
+
+    /// Reload all effects on a layer
+    #[command(name = "reload", visible_alias = "re")]
+    ReloadEffects {
+        /// Which layer to reload the effects on
+        on: LayerPos,
     },
 
     /// Create one or more new layers
@@ -286,6 +325,42 @@ pub enum Command {
     Quit,
 }
 
+#[derive(Debug, Error)]
+pub enum RunCommandError {
+    #[error("failed to create layer")]
+    NewLayer(#[from] NewLayerError),
+
+    #[error("invalid layer name")]
+    LayerName(#[from] LayerNameError),
+
+    #[error("failed to switch layers")]
+    SwitchLayer(#[from] SwitchLayerError),
+
+    #[error("failed to open file")]
+    OpenFile(#[from] OpenFileError),
+
+    #[error("failed to add effect")]
+    AddEffect(#[from] AddEffectError),
+
+    #[error("failed to reload effect")]
+    ReloadEffect(#[from] ReloadEffectError),
+
+    #[error("failed to reorder layers")]
+    ReorderLayers(#[from] ReorderLayersError),
+
+    #[error("failed to remove layers")]
+    RemoveLayer(#[from] RemoveLayerError),
+}
+
+#[derive(Debug, Error)]
+pub enum CommandError {
+    #[error("failed to parse command")]
+    Parse(#[from] clap::Error),
+
+    #[error("failed to execute command")]
+    Run(#[from] RunCommandError),
+}
+
 impl Command {
     pub fn run(
         self,
@@ -296,12 +371,13 @@ impl Command {
     ) -> Result<ControlFlow<()>, RunCommandError> {
         match self {
             Self::ListLayers { dbg } => list_layers(layers, *curr_layer, dbg),
-            Self::NewLayer { at, name } => {
-                new_raster_layer(rl, thread, layers, curr_layer, at, name)?
+            Self::NewLayer { at, name, is_group } => {
+                new_layer(rl, thread, layers, curr_layer, at, name, is_group)?
             }
             Self::AddEffect { to, effect } => {
                 add_effect(rl, thread, layers, *curr_layer, to, effect).map(|_| ())?
             }
+            Self::ReloadEffects { on } => reload_effects(rl, thread, layers, *curr_layer, on)?,
             Self::ReorderLayer { from, to } => reorder_layers(layers, curr_layer, from, to)?,
             Self::RemoveLayers { position } => remove_layers(layers, curr_layer, position)?,
             Self::SwitchLayer { to } => switch_layer(layers, curr_layer, to)?,
@@ -330,38 +406,80 @@ fn list_layers(layers: &[Layer], curr_layer: usize, debug: bool) {
     println!("\x1b[96m}}\x1b[0m");
 }
 
-fn new_raster_layer(
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Error)]
+pub enum LayerNameError {
+    #[error("layer name cannot be entirely empty or whitespace")]
+    Empty,
+
+    #[error(
+        "layer names cannot contain any of the following characters: {:?}",
+        ILLEGAL_LAYER_NAME_CHARS
+    )]
+    Illegal,
+}
+
+#[derive(Debug, Error)]
+pub enum NewLayerError {
+    #[error("bad layer insertion")]
+    InsertLayer(#[from] InsertLayerError),
+
+    #[error("bad layer name")]
+    LayerName(#[from] LayerNameError),
+
+    #[error("could not create a new raster")]
+    Raylib(#[from] raylib::error::Error),
+}
+
+fn new_layer(
     rl: &mut RaylibHandle,
     thread: &RaylibThread,
     layers: &mut Vec<Layer>,
     curr_layer: &mut usize,
     mut at: LayerPos,
     name: String,
+    is_group: bool,
 ) -> Result<(), NewLayerError> {
     rl.load_render_texture(thread, 0, 0)
         .map_err(NewLayerError::Raylib)
         .and_then(|buffer| {
-            new_layer(layers, curr_layer, at, name, buffer)?;
+            insert_layer(
+                layers,
+                curr_layer,
+                at,
+                if is_group {
+                    Layer::new_group(name, buffer)
+                } else {
+                    Layer::new_raster(name, buffer)
+                },
+            )?;
             at = LayerPos::Next;
             Ok(())
         })
 }
 
-fn new_layer<'a>(
+fn insert_layer<'a>(
     layers: &'a mut Vec<Layer>,
     curr_layer: &mut usize,
     at: LayerPos,
-    name: String,
-    buffer: RenderTexture2D,
+    layer: Layer,
 ) -> Result<&'a mut Layer, NewLayerError> {
     at.insert_layer_idx(*curr_layer, layers.len())
         .map(|pos| {
-            let new_layer = layers.insert_mut(pos, Layer::new_raster(name, buffer));
+            let new_layer = layers.insert_mut(pos, layer);
             *curr_layer = pos;
             println!("\x1b[96mcreated layer\x1b[0m \"{}\"", new_layer.name);
             new_layer
         })
         .map_err(NewLayerError::InsertLayer)
+}
+
+#[derive(Debug, Error)]
+pub enum AddEffectError {
+    #[error("cannot apply effect to specified layer")]
+    Select(#[from] SelectLayerError),
+
+    #[error("failed to load shader from file")]
+    Io(#[from] io::Error),
 }
 
 fn add_effect<'a>(
@@ -375,6 +493,38 @@ fn add_effect<'a>(
     Ok(layers[to.select_layer_idx(curr_layer, layers.len())?]
         .effects
         .push_mut(effect.build(rl, thread)?))
+}
+
+#[derive(Debug, Error)]
+pub enum ReloadEffectError {
+    #[error("cannot reload effects on specified layer")]
+    Select(#[from] SelectLayerError),
+
+    #[error("failed to reload shader from file")]
+    Io(#[from] io::Error),
+}
+
+fn reload_effects(
+    rl: &mut RaylibHandle,
+    thread: &RaylibThread,
+    layers: &mut [Layer],
+    curr_layer: usize,
+    on: LayerPos,
+) -> Result<(), ReloadEffectError> {
+    let layer = &mut layers[on.select_layer_idx(curr_layer, layers.len())?];
+    for effect in &mut layer.effects {
+        effect.reload(rl, thread)?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Error)]
+pub enum ReorderLayersError {
+    #[error("cannot move layer")]
+    SrcIndexOutOfBounds(SelectLayerError),
+
+    #[error("cannot replace layer")]
+    DstIndexOutOfBounds(SelectLayerError),
 }
 
 fn reorder_layers(
@@ -399,6 +549,12 @@ fn reorder_layers(
         Greater => layers[to..=from].rotate_right(1),
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Error)]
+pub enum RemoveLayerError {
+    #[error("cannot remove layer")]
+    Select(#[from] SelectLayerError),
 }
 
 fn remove_layers(
@@ -457,13 +613,38 @@ fn remove_layers(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Error)]
+pub enum SwitchLayerError {
+    #[error("cannot switch to layer")]
+    Select(#[from] SelectLayerError),
+}
+
 fn switch_layer(
     layers: &[Layer],
     curr_layer: &mut usize,
     to: LayerPos,
-) -> Result<(), SelectLayerError> {
+) -> Result<(), SwitchLayerError> {
     to.select_layer_idx(*curr_layer, layers.len())
         .map(|pos| *curr_layer = pos)
+        .map_err(SwitchLayerError::Select)
+}
+
+#[derive(Debug, Error)]
+pub enum OpenFileError {
+    #[error("invalid or corrupted file")]
+    Invalid,
+
+    #[error("unsupported file format")]
+    Unsupported,
+
+    #[error("failed to load image file")]
+    LoadImage(#[from] raylib::error::Error),
+
+    #[error("could not create a new layer to insert the image")]
+    NewLayer(#[from] NewLayerError),
+
+    #[error("IO system error")]
+    Io(#[from] io::Error),
 }
 
 fn open(
@@ -520,15 +701,17 @@ fn open_png(
         .and_then(|img| rtex_from_image(rl, thread, &img))
         .map_err(LoadImage)?;
 
-    new_layer(
+    insert_layer(
         layers,
         curr_layer,
         LayerPos::Next,
-        path.file_name()
-            .expect("file should have file name")
-            .to_string_lossy()
-            .to_string(),
-        buffer,
+        Layer::new_raster(
+            path.file_name()
+                .expect("file should have file name")
+                .to_string_lossy()
+                .to_string(),
+            buffer,
+        ),
     )
     .map_err(NewLayer)
     .map(|_| ())

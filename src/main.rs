@@ -3,8 +3,7 @@
 #![warn(clippy::unwrap_used, clippy::panic, clippy::arithmetic_side_effects)]
 
 use crate::{
-    command::Command,
-    error::{CommandError, print_err_recursive},
+    command::{Command, CommandError},
     layer::Layer,
 };
 use clap::Parser;
@@ -18,8 +17,20 @@ use std::{
 };
 
 mod command;
-mod error;
 mod layer;
+
+pub fn print_err_recursive(mut e: &dyn std::error::Error) {
+    loop {
+        eprint!("{e}");
+        if let Some(src) = e.source() {
+            eprint!(": ");
+            e = src;
+        } else {
+            break;
+        }
+    }
+    eprintln!();
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct ArgsIter<'a> {
