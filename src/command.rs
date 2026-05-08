@@ -490,9 +490,13 @@ fn add_effect<'a>(
     to: LayerPos,
     effect: EffectBuilder,
 ) -> Result<&'a mut Effect, AddEffectError> {
-    Ok(layers[to.select_layer_idx(curr_layer, layers.len())?]
-        .effects
-        .push_mut(effect.build(rl, thread)?))
+    let idx = to.select_layer_idx(curr_layer, layers.len())?;
+    let n = layers[idx].effects.len();
+    Ok(layers[idx].effects.push_mut(
+        effect
+            .build(rl, thread)
+            .inspect(|_| println!("\x1b[96meffect {n} added to layer {idx}\x1b[0m"))?,
+    ))
 }
 
 #[derive(Debug, Error)]
@@ -511,9 +515,15 @@ fn reload_effects(
     curr_layer: usize,
     on: LayerPos,
 ) -> Result<(), ReloadEffectError> {
-    let layer = &mut layers[on.select_layer_idx(curr_layer, layers.len())?];
-    for effect in &mut layer.effects {
-        effect.reload(rl, thread)?;
+    let idx = on.select_layer_idx(curr_layer, layers.len())?;
+    let layer = &mut layers[idx];
+    if layer.effects.is_empty() {
+        println!("\x1b[1;95mwarning:\x1b[0m layer {idx} has no effects")
+    } else {
+        for (i, effect) in layer.effects.iter_mut().enumerate() {
+            effect.reload(rl, thread)?;
+            println!("\x1b[96meffect {i} reloaded\x1b[0m");
+        }
     }
     Ok(())
 }

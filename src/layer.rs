@@ -115,9 +115,11 @@ impl Effect {
 #[derive(Debug, Clone, Args)]
 pub struct EffectBuilder {
     /// Path to the vertex shader code file
+    #[arg(short, long = "vert")]
     vs_path: Option<PathBuf>,
 
     /// Path to the fragment shader code file
+    #[arg(short, long = "frag")]
     fs_path: Option<PathBuf>,
 }
 

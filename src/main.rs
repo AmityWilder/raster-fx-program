@@ -85,7 +85,7 @@ fn main() {
     let (mut rl, thread) = init().title("Amity FX").size(1280, 720).resizable().build();
     rl.set_trace_log(TraceLogLevel::LOG_ERROR);
 
-    rl.set_target_fps(60);
+    rl.set_target_fps(30);
 
     let mut history: VecDeque<String> = VecDeque::new();
     let mut layers: Vec<Layer> = Vec::new();
