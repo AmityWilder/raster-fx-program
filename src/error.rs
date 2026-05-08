@@ -30,16 +30,19 @@ pub enum LayerNameError {
     Illegal,
 }
 
-#[derive(Debug, Error)]
-pub enum NewLayerError {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Error)]
+pub enum InsertLayerError {
     #[error("cannot exceed {} layers on a {}-bit system", const { usize::MAX }, const { std::mem::size_of::<usize>() * 8 })]
     TooManyLayers,
 
-    #[error(
-        "layer {} is out of bounds, must be at most equal to the number of layers",
-        .0
-    )]
+    #[error("layer position {} is out of bounds, cannot exceed the number of layers", .0)]
     IndexOutOfBounds(IndexError),
+}
+
+#[derive(Debug, Error)]
+pub enum NewLayerError {
+    #[error("bad layer insertion")]
+    InsertLayer(#[from] InsertLayerError),
 
     #[error("bad layer name")]
     LayerName(#[from] LayerNameError),
@@ -49,9 +52,15 @@ pub enum NewLayerError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Error)]
-pub enum SwitchLayerError {
-    #[error("layer {} is out of bounds", .0)]
+pub enum SelectLayerError {
+    #[error("layer {} does not exist", .0)]
     IndexOutOfBounds(IndexError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Error)]
+pub enum SwitchLayerError {
+    #[error("cannot switch to layer")]
+    Select(#[from] SelectLayerError),
 }
 
 #[derive(Debug, Error)]
@@ -72,19 +81,28 @@ pub enum OpenFileError {
     Io(#[from] io::Error),
 }
 
+#[derive(Debug, Error)]
+pub enum AddEffectError {
+    #[error("cannot apply effect to specified layer")]
+    Select(#[from] SelectLayerError),
+
+    #[error("failed to load shader from file")]
+    Io(#[from] io::Error),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Error)]
 pub enum ReorderLayersError {
-    #[error("layer {} cannot be moved, because it does not exist", .0)]
-    SrcIndexOutOfBounds(IndexError),
+    #[error("cannot move layer")]
+    SrcIndexOutOfBounds(SelectLayerError),
 
-    #[error("cannot move a layer to out-of-bounds index {}", .0)]
-    DstIndexOutOfBounds(IndexError),
+    #[error("cannot replace layer")]
+    DstIndexOutOfBounds(SelectLayerError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Error)]
 pub enum RemoveLayerError {
-    #[error("layer {} cannot be removed, because it does not exist", .0)]
-    IndexOutOfBounds(usize),
+    #[error("cannot remove layer")]
+    Select(#[from] SelectLayerError),
 }
 
 #[derive(Debug, Error)]
@@ -96,10 +114,13 @@ pub enum RunCommandError {
     LayerName(#[from] LayerNameError),
 
     #[error("failed to switch layers")]
-    SwitchLayer(#[from] SwitchLayerError),
+    SwitchLayer(#[from] SelectLayerError),
 
     #[error("failed to open file")]
     OpenFile(#[from] OpenFileError),
+
+    #[error("failed to add effect")]
+    AddEffect(#[from] AddEffectError),
 
     #[error("failed to reorder layers")]
     ReorderLayers(#[from] ReorderLayersError),

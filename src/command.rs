@@ -1,6 +1,6 @@
 use crate::{
     error::*,
-    layer::{Layer, rtex_from_image},
+    layer::{Effect, EffectBuilder, Layer, rtex_from_image},
 };
 use clap::{Parser, ValueHint};
 use raylib::prelude::*;
@@ -49,12 +49,12 @@ impl FromStr for LayerPos {
 }
 
 impl LayerPos {
-    pub fn new_layer_idx(
+    pub fn insert_layer_idx(
         self,
         curr_layer: usize,
         layer_count: usize,
-    ) -> Result<usize, NewLayerError> {
-        use NewLayerError::*;
+    ) -> Result<usize, InsertLayerError> {
+        use InsertLayerError::*;
         match self {
             Self::Current => {
                 if layer_count == 0 {
@@ -129,12 +129,12 @@ impl LayerPos {
         }
     }
 
-    pub fn switch_layer_idx(
+    pub fn select_layer_idx(
         self,
         curr_layer: usize,
         layer_count: usize,
-    ) -> Result<usize, SwitchLayerError> {
-        use SwitchLayerError::*;
+    ) -> Result<usize, SelectLayerError> {
+        use SelectLayerError::*;
         match self {
             Self::Current => {
                 if layer_count == 0 {
@@ -235,6 +235,17 @@ pub enum Command {
         name: String,
     },
 
+    /// Apply an effect to a layer
+    #[command(name = "effect", visible_alias = "fx")]
+    AddEffect {
+        /// Which layer to apply the effect to
+        to: LayerPos,
+
+        /// The DNA of the effect to add
+        #[command(flatten)]
+        effect: EffectBuilder,
+    },
+
     /// Create one or more new layers
     #[command(name = "move", visible_alias = "mv")]
     ReorderLayer {
@@ -283,22 +294,18 @@ impl Command {
         layers: &mut Vec<Layer>,
         curr_layer: &mut usize,
     ) -> Result<ControlFlow<()>, RunCommandError> {
-        use RunCommandError::*;
         match self {
             Self::ListLayers { dbg } => list_layers(layers, *curr_layer, dbg),
             Self::NewLayer { at, name } => {
                 new_raster_layer(rl, thread, layers, curr_layer, at, name)?
             }
-            Self::ReorderLayer { from, to } => {
-                reorder_layers(layers, curr_layer, from, to).map_err(ReorderLayers)?
+            Self::AddEffect { to, effect } => {
+                add_effect(rl, thread, layers, *curr_layer, to, effect).map(|_| ())?
             }
-            Self::RemoveLayers { position } => {
-                remove_layers(layers, curr_layer, position).map_err(RemoveLayer)?
-            }
-            Self::SwitchLayer { to } => {
-                switch_layer(layers, curr_layer, to).map_err(SwitchLayer)?
-            }
-            Self::Open { path } => open(rl, thread, layers, curr_layer, path).map_err(OpenFile)?,
+            Self::ReorderLayer { from, to } => reorder_layers(layers, curr_layer, from, to)?,
+            Self::RemoveLayers { position } => remove_layers(layers, curr_layer, position)?,
+            Self::SwitchLayer { to } => switch_layer(layers, curr_layer, to)?,
+            Self::Open { path } => open(rl, thread, layers, curr_layer, path)?,
             Self::Quit {} => return Ok(ControlFlow::Break(())),
         }
         Ok(ControlFlow::Continue(()))
@@ -347,12 +354,27 @@ fn new_layer<'a>(
     name: String,
     buffer: RenderTexture2D,
 ) -> Result<&'a mut Layer, NewLayerError> {
-    at.new_layer_idx(*curr_layer, layers.len()).map(|pos| {
-        let new_layer = layers.insert_mut(pos, Layer::new_raster(name, buffer));
-        *curr_layer = pos;
-        println!("\x1b[96mcreated layer\x1b[0m \"{}\"", new_layer.name);
-        new_layer
-    })
+    at.insert_layer_idx(*curr_layer, layers.len())
+        .map(|pos| {
+            let new_layer = layers.insert_mut(pos, Layer::new_raster(name, buffer));
+            *curr_layer = pos;
+            println!("\x1b[96mcreated layer\x1b[0m \"{}\"", new_layer.name);
+            new_layer
+        })
+        .map_err(NewLayerError::InsertLayer)
+}
+
+fn add_effect<'a>(
+    rl: &mut RaylibHandle,
+    thread: &RaylibThread,
+    layers: &'a mut [Layer],
+    curr_layer: usize,
+    to: LayerPos,
+    effect: EffectBuilder,
+) -> Result<&'a mut Effect, AddEffectError> {
+    Ok(layers[to.select_layer_idx(curr_layer, layers.len())?]
+        .effects
+        .push_mut(effect.build(rl, thread)?))
 }
 
 fn reorder_layers(
@@ -364,21 +386,11 @@ fn reorder_layers(
     use ReorderLayersError::*;
     use std::cmp::Ordering::*;
     let from = from
-        .switch_layer_idx(*curr_layer, layers.len())
-        .map_err(|e| {
-            use SwitchLayerError::*;
-            match e {
-                IndexOutOfBounds(idx) => SrcIndexOutOfBounds(idx),
-            }
-        })?;
+        .select_layer_idx(*curr_layer, layers.len())
+        .map_err(SrcIndexOutOfBounds)?;
     let to = to
-        .switch_layer_idx(*curr_layer, layers.len())
-        .map_err(|e| {
-            use SwitchLayerError::*;
-            match e {
-                IndexOutOfBounds(idx) => DstIndexOutOfBounds(idx),
-            }
-        })?;
+        .select_layer_idx(*curr_layer, layers.len())
+        .map_err(DstIndexOutOfBounds)?;
     match from.cmp(&to) {
         Less => layers[from..=to].rotate_left(1),
         Equal => {
@@ -418,7 +430,9 @@ fn remove_layers(
                 });
                 Ok(())
             } else {
-                Err(IndexOutOfBounds(n))
+                Err(Select(SelectLayerError::IndexOutOfBounds(
+                    IndexError::Value(n),
+                )))
             }
         }
         None => {
@@ -427,7 +441,9 @@ fn remove_layers(
                     *curr_layer, 0,
                     "curr_layer should always be zero if there are no layers"
                 );
-                Err(IndexOutOfBounds(0))
+                Err(Select(SelectLayerError::IndexOutOfBounds(
+                    IndexError::Value(0),
+                )))
             } else {
                 assert!(
                     *curr_layer < layers.len(),
@@ -445,8 +461,8 @@ fn switch_layer(
     layers: &[Layer],
     curr_layer: &mut usize,
     to: LayerPos,
-) -> Result<(), SwitchLayerError> {
-    to.switch_layer_idx(*curr_layer, layers.len())
+) -> Result<(), SelectLayerError> {
+    to.select_layer_idx(*curr_layer, layers.len())
         .map(|pos| *curr_layer = pos)
 }
 

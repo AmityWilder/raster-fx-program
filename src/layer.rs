@@ -1,4 +1,6 @@
+use clap::Args;
 use raylib::prelude::*;
+use std::{fs, path::PathBuf};
 
 pub fn rtex_from_image(
     rl: &mut RaylibHandle,
@@ -51,16 +53,6 @@ pub fn rtex_from_image(
     })
 }
 
-#[derive(Debug)]
-pub enum Effect {
-    Shader(Shader),
-    BlendMode(BlendMode),
-}
-
-trait EffectSlice {
-    fn apply(&mut self, d: &mut impl RaylibDraw, texture: impl AsRef<ffi::Texture2D>);
-}
-
 struct ShaderMode<'a>(&'a mut Shader);
 
 impl<'a> ShaderMode<'a> {
@@ -103,22 +95,57 @@ impl Drop for BlendingMode<'_> {
     }
 }
 
+#[derive(Debug)]
+pub struct Effect(Shader);
+
+#[derive(Debug, Clone, Args)]
+pub struct EffectBuilder {
+    /// Path to the vertex shader code file
+    pub vs_path: Option<PathBuf>,
+
+    /// Path to the fragment shader code file
+    pub fs_path: Option<PathBuf>,
+}
+
+impl EffectBuilder {
+    pub fn build(
+        self,
+        rl: &mut RaylibHandle,
+        thread: &RaylibThread,
+    ) -> Result<Effect, std::io::Error> {
+        let (vs_code, fs_code);
+        Ok(Effect(rl.load_shader_from_memory(
+            thread,
+            match self.vs_path {
+                Some(path) => {
+                    vs_code = fs::read_to_string(path)?;
+                    Some(vs_code.as_str())
+                }
+                None => None,
+            },
+            match self.fs_path {
+                Some(path) => {
+                    fs_code = fs::read_to_string(path)?;
+                    Some(fs_code.as_str())
+                }
+                None => None,
+            },
+        )))
+    }
+}
+
+trait EffectSlice {
+    fn apply(&mut self, d: &mut impl RaylibDraw, texture: impl AsRef<ffi::Texture2D>, tint: Color);
+}
+
 impl EffectSlice for [Effect] {
-    fn apply(&mut self, d: &mut impl RaylibDraw, texture: impl AsRef<ffi::Texture2D>) {
+    fn apply(&mut self, d: &mut impl RaylibDraw, texture: impl AsRef<ffi::Texture2D>, tint: Color) {
         if let [first, rest @ ..] = self {
-            match first {
-                Effect::Shader(shader) => {
-                    let mut _mode = ShaderMode::begin(shader);
-                    rest.apply(d, texture);
-                }
-                Effect::BlendMode(mode) => {
-                    let mut _mode = BlendingMode::begin(mode);
-                    rest.apply(d, texture);
-                }
-            }
+            let mut _mode = ShaderMode::begin(&mut first.0);
+            rest.apply(d, texture, tint);
         } else {
             // empty
-            d.draw_texture(texture, 0, 0, Color::WHITE);
+            d.draw_texture(texture, 0, 0, tint);
         }
     }
 }
@@ -132,6 +159,27 @@ enum LayerContent {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Blending {
+    pub mode: BlendMode,
+    pub tint: Color,
+}
+
+impl Blending {
+    pub const fn new() -> Self {
+        Self {
+            mode: BlendMode::BLEND_ALPHA,
+            tint: Color::WHITE,
+        }
+    }
+}
+
+impl Default for Blending {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug)]
 pub struct Layer {
     pub name: String,
@@ -142,29 +190,33 @@ pub struct Layer {
     is_dirty: bool,
     content: LayerContent,
     pub effects: Vec<Effect>,
+    pub blend: Blending,
 }
 
 impl Layer {
-    pub const fn new_raster(name: String, buffer: RenderTexture2D) -> Self {
+    const fn new(name: String, buffer: RenderTexture2D, content: LayerContent) -> Self {
         Self {
             name,
             buffer,
             is_dirty: true,
-            content: LayerContent::Raster,
+            content,
             effects: Vec::new(),
+            blend: Blending::new(),
         }
     }
 
+    pub const fn new_raster(name: String, buffer: RenderTexture2D) -> Self {
+        Self::new(name, buffer, LayerContent::Raster)
+    }
+
     pub const fn new_group(name: String, buffer: RenderTexture2D) -> Self {
-        Self {
+        Self::new(
             name,
             buffer,
-            is_dirty: true,
-            content: LayerContent::Group {
+            LayerContent::Group {
                 children: Vec::new(),
             },
-            effects: Vec::new(),
-        }
+        )
     }
 
     /// Returns [`Some`] for groups and [`None`] otherwise
@@ -232,6 +284,9 @@ impl Layer {
     }
 
     pub fn draw_buffer(&mut self, d: &mut impl RaylibDraw) {
-        self.effects.as_mut_slice().apply(d, &self.buffer);
+        let _mode = BlendingMode::begin(&mut self.blend.mode);
+        self.effects
+            .as_mut_slice()
+            .apply(d, &self.buffer, self.blend.tint);
     }
 }
