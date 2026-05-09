@@ -1,6 +1,13 @@
+use crate::rlgl::*;
 use clap::Args;
 use raylib::prelude::*;
-use std::{fs, marker::PhantomData, path::PathBuf};
+use std::{
+    cell::{Ref, RefCell, RefMut},
+    fs,
+    marker::PhantomData,
+    path::PathBuf,
+    rc::Rc,
+};
 
 pub fn rtex_from_image(
     rl: &mut RaylibHandle,
@@ -57,7 +64,7 @@ struct ShaderMode<'a>(PhantomData<&'a mut Shader>);
 
 impl<'a> ShaderMode<'a> {
     fn begin(shader: &'a mut Shader) -> Self {
-        // SAFETY: TBD
+        #[warn(clippy::undocumented_unsafe_blocks, reason = "TBD")]
         unsafe {
             ffi::BeginShaderMode(*shader.as_ref());
         }
@@ -67,30 +74,9 @@ impl<'a> ShaderMode<'a> {
 
 impl Drop for ShaderMode<'_> {
     fn drop(&mut self) {
-        // SAFETY: TBD
+        #[warn(clippy::undocumented_unsafe_blocks, reason = "TBD")]
         unsafe {
             ffi::EndShaderMode();
-        }
-    }
-}
-
-struct BlendingMode<'a>(PhantomData<&'a mut BlendMode>);
-
-impl<'a> BlendingMode<'a> {
-    fn begin(mode: &'a mut BlendMode) -> Self {
-        // SAFETY: TBD
-        unsafe {
-            ffi::BeginBlendMode(*mode as i32);
-        }
-        Self(PhantomData)
-    }
-}
-
-impl Drop for BlendingMode<'_> {
-    fn drop(&mut self) {
-        // SAFETY: TBD
-        unsafe {
-            ffi::EndBlendMode();
         }
     }
 }
@@ -172,7 +158,7 @@ trait EffectSlice {
 }
 
 fn draw_texture_quad(
-    _d: &mut impl RaylibDraw,
+    d: &mut impl RaylibDraw,
     texture: &impl RaylibTexture2D,
     mat: Matrix,
     tint: Color,
@@ -180,8 +166,7 @@ fn draw_texture_quad(
     if !texture.is_texture_valid() {
         return;
     }
-    let texture = texture.as_ref();
-    let (width, height) = (texture.width as f32, texture.height as f32);
+    let (width, height) = (texture.width() as f32, texture.height() as f32);
     let [tl, tr, bl, br] = [
         Vector3::new(0.0, 0.0, 0.0).transform_with(mat),
         Vector3::new(width, 0.0, 0.0).transform_with(mat),
@@ -190,34 +175,18 @@ fn draw_texture_quad(
     ]
     .map(|Vector3 { x, y, z: _ }| Vector2 { x, y });
 
-    // SAFETY: based on DrawTexturePro
-    #[allow(clippy::multiple_unsafe_ops_per_block)]
-    unsafe {
-        ffi::rlSetTexture(texture.id);
-        ffi::rlBegin(ffi::RL_QUADS as i32);
+    // Based on DrawTexturePro
 
-        ffi::rlColor4ub(tint.r, tint.g, tint.b, tint.a);
-        ffi::rlNormal3f(0.0, 0.0, 1.0); // Normal vector pointing towards viewer
-
-        // Top-left corner for texture and quad
-        ffi::rlTexCoord2f(0.0, 0.0);
-        ffi::rlVertex2f(tl.x, tl.y);
-
-        // Bottom-left corner for texture and quad
-        ffi::rlTexCoord2f(0.0, 1.0);
-        ffi::rlVertex2f(bl.x, bl.y);
-
-        // Bottom-right corner for texture and quad
-        ffi::rlTexCoord2f(1.0, 1.0);
-        ffi::rlVertex2f(br.x, br.y);
-
-        // Top-right corner for texture and quad
-        ffi::rlTexCoord2f(1.0, 0.0);
-        ffi::rlVertex2f(tr.x, tr.y);
-
-        ffi::rlEnd();
-        ffi::rlSetTexture(0);
-    }
+    let mut d = d.rl_set_texture(texture);
+    let mut d = d.rl_begin_quads();
+    d.rl_color(tint);
+    d.rl_normal(Vector3::new(0.0, 0.0, 1.0)); // Normal vector pointing towards viewer
+    d.quad([
+        (Vector2::new(0.0, 0.0), tl), // Top-left corner for texture and quad
+        (Vector2::new(0.0, 1.0), bl), // Bottom-left corner for texture and quad
+        (Vector2::new(1.0, 1.0), br), // Bottom-right corner for texture and quad
+        (Vector2::new(1.0, 0.0), tr), // Top-right corner for texture and quad
+    ]);
 }
 
 impl EffectSlice for [Effect] {
@@ -240,7 +209,9 @@ impl EffectSlice for [Effect] {
 
 #[derive(Debug)]
 enum LayerContent {
-    Raster,
+    Raster {
+        asset: Option<Rc<RefCell<RenderTexture2D>>>,
+    },
     Group {
         /// A group may be empty, but still distinct from a raster
         children: Vec<Layer>,
@@ -313,7 +284,7 @@ impl Layer {
     }
 
     pub const fn new_raster(name: String, buffer: RenderTexture2D) -> Self {
-        Self::new(name, buffer, LayerContent::Raster)
+        Self::new(name, buffer, LayerContent::Raster { asset: None })
     }
 
     pub const fn new_group(name: String, buffer: RenderTexture2D) -> Self {
@@ -329,7 +300,7 @@ impl Layer {
     /// Returns [`Some`] for groups and [`None`] otherwise
     pub const fn children(&self) -> Option<&Vec<Layer>> {
         match &self.content {
-            LayerContent::Raster => None,
+            LayerContent::Raster { .. } => None,
             LayerContent::Group { children } => Some(children),
         }
     }
@@ -339,7 +310,7 @@ impl Layer {
     /// Assumes children will be modified and marks the group as dirty
     pub const fn children_mut(&mut self) -> Option<&mut Vec<Layer>> {
         match &mut self.content {
-            LayerContent::Raster => None,
+            LayerContent::Raster { .. } => None,
             LayerContent::Group { children } => {
                 self.is_dirty = true;
                 Some(children)
@@ -350,7 +321,7 @@ impl Layer {
     /// Returns [`Some`] for rasters and [`None`] otherwise
     pub const fn buffer(&self) -> Option<&RenderTexture2D> {
         match &self.content {
-            LayerContent::Raster => Some(&self.buffer),
+            LayerContent::Raster { .. } => Some(&self.buffer),
             LayerContent::Group { .. } => None,
         }
     }
@@ -360,7 +331,7 @@ impl Layer {
     /// Assumes buffer will be modified and marks the raster as dirty
     pub const fn buffer_mut(&mut self) -> Option<&mut RenderTexture2D> {
         match &mut self.content {
-            LayerContent::Raster => {
+            LayerContent::Raster { .. } => {
                 self.is_dirty = true;
                 Some(&mut self.buffer)
             }
@@ -368,6 +339,28 @@ impl Layer {
         }
     }
 
+    /// Borrows and returns [`Some`] for asset rasters and [`None`] otherwise
+    pub fn asset(&self) -> Option<Ref<'_, RenderTexture2D>> {
+        match &self.content {
+            LayerContent::Raster { asset } => asset.as_ref().map(|x| x.borrow()),
+            LayerContent::Group { .. } => None,
+        }
+    }
+
+    /// Borrows and returns [`Some`] for asset rasters and [`None`] otherwise
+    ///
+    /// Assumes buffer will be modified and marks the raster as dirty
+    pub fn asset_mut(&mut self) -> Option<RefMut<'_, RenderTexture2D>> {
+        match &mut self.content {
+            LayerContent::Raster { asset } => {
+                self.is_dirty = true;
+                asset.as_mut().map(|x| x.borrow_mut())
+            }
+            LayerContent::Group { .. } => None,
+        }
+    }
+
+    /// Pre-renders each child's buffer with DFS to ensure only one texture is ever drawn at a time
     pub fn prep_buffer_recursively(
         &mut self,
         rl: &mut RaylibHandle,
@@ -390,10 +383,10 @@ impl Layer {
         is_updated
     }
 
+    /// Draws the currently cached buffer with effects applied
     pub fn draw_buffer(&mut self, d: &mut impl RaylibDraw, transform: Matrix) {
-        let _mode = BlendingMode::begin(&mut self.blend.mode);
         self.effects.as_mut_slice().apply(
-            d,
+            &mut d.begin_blend_mode(self.blend.mode),
             &self.buffer,
             self.blend.tint,
             #[allow(clippy::arithmetic_side_effects)]

@@ -1,9 +1,10 @@
-#![deny(clippy::undocumented_unsafe_blocks)]
+#![deny(clippy::undocumented_unsafe_blocks, clippy::missing_safety_doc)]
 #![warn(clippy::multiple_unsafe_ops_per_block)]
 #![warn(clippy::unwrap_used, clippy::panic, clippy::arithmetic_side_effects)]
 #![warn(clippy::missing_const_for_fn)]
 
 use crate::{
+    asset::Asset,
     command::{Command, CommandError},
     layer::Layer,
 };
@@ -17,8 +18,10 @@ use std::{
     thread,
 };
 
+mod asset;
 mod command;
 mod layer;
+mod rlgl;
 
 pub fn print_err_recursive(mut e: &dyn std::error::Error) {
     loop {
@@ -89,6 +92,7 @@ fn main() {
     rl.set_target_fps(30);
 
     let mut history: VecDeque<String> = VecDeque::new();
+    let mut assets: Vec<Asset> = Vec::new();
     let mut layers: Vec<Layer> = Vec::new();
     let mut curr_layer: usize = 0;
 
@@ -99,7 +103,7 @@ fn main() {
                     match Command::try_parse_from(std::iter::once("").chain(ArgsIter::new(input)))
                         .map_err(CommandError::Parse)
                         .and_then(|cmd| {
-                            cmd.run(&mut rl, &thread, &mut layers, &mut curr_layer)
+                            cmd.run(&mut rl, &thread, &mut assets, &mut layers, &mut curr_layer)
                                 .map_err(CommandError::Run)
                         }) {
                         Ok(ControlFlow::Continue(())) => {}
