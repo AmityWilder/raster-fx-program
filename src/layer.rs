@@ -1,16 +1,19 @@
 use crate::{
+    asset_pos::AssetPos,
     command::error::{NewLayerError, RemoveLayerError, ReorderLayersError},
     layer_pos::{InsertLayerError, LayerPos, SelectLayerError},
     rlgl::*,
 };
 use raylib::prelude::*;
 use std::{
-    cell::{Ref, RefCell, RefMut},
+    cell::RefCell,
     collections::BTreeSet,
     rc::{Rc, Weak},
 };
 use thiserror::Error;
 
+/// # Panics
+/// This method may panic if `image` is invalid
 pub fn rtex_from_image(
     rl: &mut RaylibHandle,
     thread: &RaylibThread,
@@ -64,6 +67,7 @@ pub fn rtex_from_image(
 
 #[derive(Debug)]
 pub struct Effect {
+    pub src: AssetPos,
     pub asset: Weak<RefCell<Shader>>,
 }
 
@@ -179,11 +183,21 @@ impl EffectSlice for [Effect] {
 }
 
 #[derive(Debug)]
-enum LayerContent {
-    Raster {
-        asset: Option<Rc<RefCell<RenderTexture2D>>>,
+pub enum Raster {
+    Unique {
+        buffer: RenderTexture2D,
     },
+    Asset {
+        buffer: Rc<RefCell<RenderTexture2D>>,
+    },
+}
+
+#[derive(Debug)]
+enum LayerContent {
+    Raster(Raster),
     Group {
+        buffer: RenderTexture2D,
+
         /// A group may be empty, but still distinct from a raster
         children: Vec<Layer>,
     },
@@ -213,8 +227,6 @@ impl Default for Blending {
 #[derive(Debug)]
 pub struct Layer {
     pub name: String,
-    /// private on groups, accessible on rasters
-    buffer: RenderTexture2D,
     /// rasters: the buffer has changed, making containing group buffers out of date
     /// groups: the number or order of children has changed, making the buffer out of date in a way the children cannot express
     is_dirty: bool,
@@ -225,10 +237,9 @@ pub struct Layer {
 }
 
 impl Layer {
-    const fn new(name: String, buffer: RenderTexture2D, content: LayerContent) -> Self {
+    const fn new(name: String, content: LayerContent) -> Self {
         Self {
             name,
-            buffer,
             is_dirty: true,
             content,
             effects: Vec::new(),
@@ -254,81 +265,22 @@ impl Layer {
         }
     }
 
+    pub const fn new_raster_asset(name: String, buffer: Rc<RefCell<RenderTexture2D>>) -> Self {
+        Self::new(name, LayerContent::Raster(Raster::Asset { buffer }))
+    }
+
     pub const fn new_raster(name: String, buffer: RenderTexture2D) -> Self {
-        Self::new(name, buffer, LayerContent::Raster { asset: None })
+        Self::new(name, LayerContent::Raster(Raster::Unique { buffer }))
     }
 
     pub const fn new_group(name: String, buffer: RenderTexture2D) -> Self {
         Self::new(
             name,
-            buffer,
             LayerContent::Group {
+                buffer,
                 children: Vec::new(),
             },
         )
-    }
-
-    /// Returns [`Some`] for groups and [`None`] otherwise
-    pub const fn children(&self) -> Option<&Vec<Layer>> {
-        match &self.content {
-            LayerContent::Raster { .. } => None,
-            LayerContent::Group { children } => Some(children),
-        }
-    }
-
-    /// Returns [`Some`] for groups and [`None`] otherwise
-    ///
-    /// Assumes children will be modified and marks the group as dirty
-    pub const fn children_mut(&mut self) -> Option<&mut Vec<Layer>> {
-        match &mut self.content {
-            LayerContent::Raster { .. } => None,
-            LayerContent::Group { children } => {
-                self.is_dirty = true;
-                Some(children)
-            }
-        }
-    }
-
-    /// Returns [`Some`] for rasters and [`None`] otherwise
-    pub const fn buffer(&self) -> Option<&RenderTexture2D> {
-        match &self.content {
-            LayerContent::Raster { .. } => Some(&self.buffer),
-            LayerContent::Group { .. } => None,
-        }
-    }
-
-    /// Returns [`Some`] for rasters and [`None`] otherwise
-    ///
-    /// Assumes buffer will be modified and marks the raster as dirty
-    pub const fn buffer_mut(&mut self) -> Option<&mut RenderTexture2D> {
-        match &mut self.content {
-            LayerContent::Raster { .. } => {
-                self.is_dirty = true;
-                Some(&mut self.buffer)
-            }
-            LayerContent::Group { .. } => None,
-        }
-    }
-
-    /// Borrows and returns [`Some`] for asset rasters and [`None`] otherwise
-    pub fn asset(&self) -> Option<Ref<'_, RenderTexture2D>> {
-        match &self.content {
-            LayerContent::Raster { asset } => asset.as_ref().map(|x| x.borrow()),
-            LayerContent::Group { .. } => None,
-        }
-    }
-
-    /// Borrows and returns [`Some`] for asset rasters and [`None`] otherwise
-    ///
-    /// Assumes buffer will be modified and marks the raster as dirty
-    pub fn asset_mut(&mut self) -> Option<RefMut<'_, RenderTexture2D>> {
-        match &mut self.content {
-            LayerContent::Raster { asset } => {
-                self.is_dirty = true;
-                asset.as_mut().map(|x| x.borrow_mut())
-            }
-            LayerContent::Group { .. } => None,
-        }
     }
 
     /// Pre-renders each child's buffer with DFS to ensure only one texture is ever drawn at a time
@@ -339,7 +291,7 @@ impl Layer {
     ) -> Result<bool, ApplyEffectsError> {
         let mut err = None;
         let mut is_updated = std::mem::take(&mut self.is_dirty);
-        if let LayerContent::Group { children } = &mut self.content {
+        if let LayerContent::Group { children, buffer } = &mut self.content {
             // cannot be represented as "any()" because all must be visited to prep them
             for child in children.iter_mut() {
                 match child.prep_buffer_recursively(rl, thread) {
@@ -348,7 +300,7 @@ impl Layer {
                 }
             }
             if is_updated {
-                let mut d = rl.begin_texture_mode(thread, &mut self.buffer);
+                let mut d = rl.begin_texture_mode(thread, buffer);
                 d.clear_background(Color::BLANK);
                 for child in children.iter_mut().rev() {
                     if let Err(e) = child.draw_buffer(&mut d, self.transform) {
@@ -369,9 +321,17 @@ impl Layer {
         d: &mut impl RaylibDraw,
         transform: Matrix,
     ) -> Result<(), ApplyEffectsError> {
+        let asset_ref;
         self.effects.apply(
             &mut d.begin_blend_mode(self.blend.mode),
-            &self.buffer,
+            match &self.content {
+                LayerContent::Raster(Raster::Unique { buffer })
+                | LayerContent::Group { buffer, .. } => buffer,
+                LayerContent::Raster(Raster::Asset { buffer, .. }) => {
+                    asset_ref = buffer.borrow();
+                    &*asset_ref
+                }
+            },
             self.blend.tint,
             #[allow(clippy::arithmetic_side_effects)]
             &(transform * self.transform),
@@ -384,6 +344,18 @@ impl Layer {
 pub struct Layers {
     list: Vec<Layer>,
     curr: usize,
+}
+
+#[derive(Debug, Error)]
+pub enum SaveLayersError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
+#[derive(Debug, Error)]
+pub enum LoadLayersError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
 }
 
 impl Layers {
@@ -451,6 +423,8 @@ impl Layers {
         Ok(new_layer)
     }
 
+    /// # Panics
+    /// This method may panic if [`Layers::select_idx`] is implemented incorrectly
     pub fn get(&self, at: LayerPos) -> Result<&Layer, SelectLayerError> {
         self.select_idx(at).map(|idx| {
             self.list
@@ -459,6 +433,8 @@ impl Layers {
         })
     }
 
+    /// # Panics
+    /// This method may panic if [`Layers::select_idx`] is implemented incorrectly
     pub fn get_mut(&mut self, at: LayerPos) -> Result<&mut Layer, SelectLayerError> {
         self.select_idx(at).map(|idx| {
             self.list
@@ -480,6 +456,8 @@ impl Layers {
         Ok(())
     }
 
+    /// # Panics
+    /// This method may panic if [`Layers::select_idx`] is implemented incorrectly
     pub fn remove(
         &mut self,
         positions: impl IntoIterator<Item = LayerPos>,

@@ -116,6 +116,9 @@ impl LayerPos {
     /// Determine the layer index that may not exist yet so it can be created.
     ///
     /// Valid indices: `0..=layer_count`
+    ///
+    /// # Panics
+    /// This method can panic if `curr_layer` is invalid
     pub fn insert_layer_idx(
         self,
         curr_layer: usize,
@@ -199,6 +202,9 @@ impl LayerPos {
     /// Determine the layer index that must exist so it can be accessed.
     ///
     /// Valid indices: `0..layer_count`
+    ///
+    /// # Panics
+    /// This method can panic if `curr_layer` is invalid
     pub fn select_layer_idx(
         self,
         curr_layer: usize,

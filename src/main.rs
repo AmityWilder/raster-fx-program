@@ -1,7 +1,20 @@
-#![deny(clippy::undocumented_unsafe_blocks, clippy::missing_safety_doc)]
-#![warn(clippy::multiple_unsafe_ops_per_block)]
-#![warn(clippy::unwrap_used, clippy::panic, clippy::arithmetic_side_effects)]
-#![warn(clippy::missing_const_for_fn)]
+#![deny(
+    clippy::undocumented_unsafe_blocks,
+    clippy::missing_safety_doc,
+    reason = "do not be unsound"
+)]
+#![warn(
+    clippy::multiple_unsafe_ops_per_block,
+    reason = "avoid large chunks of unsafe code"
+)]
+#![warn(
+    clippy::missing_panics_doc,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::arithmetic_side_effects,
+    reason = "avoid panics at all costs"
+)]
+#![warn(clippy::missing_const_for_fn, reason = "hygene")]
 
 use crate::{
     asset::Assets,

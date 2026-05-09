@@ -149,11 +149,12 @@ impl Asset {
 }
 
 impl Layer {
-    pub fn link(&mut self, asset: &Asset) -> Result<(), LinkError> {
-        match &asset.data {
+    pub fn link(&mut self, assets: &Assets, at: AssetPos) -> Result<(), LinkError> {
+        match &assets.get(at)?.data {
             AssetContent::Raster { .. } => todo!(),
 
             AssetContent::Shader { shader, .. } => self.effects.push(Effect {
+                src: at,
                 asset: Rc::downgrade(shader),
             }),
         }
@@ -188,6 +189,8 @@ impl Assets {
         self.list.iter_mut()
     }
 
+    /// # Panics
+    /// This method may panic if [`AssetPos::select_asset_idx`] is incorrectly implemented
     pub fn get(&self, at: AssetPos) -> Result<&Asset, SelectAssetError> {
         at.select_asset_idx(self.list.len()).map(|idx| {
             self.list
@@ -196,6 +199,8 @@ impl Assets {
         })
     }
 
+    /// # Panics
+    /// This method may panic if [`AssetPos::select_asset_idx`] is incorrectly implemented
     pub fn get_mut(&mut self, at: AssetPos) -> Result<&mut Asset, SelectAssetError> {
         at.select_asset_idx(self.list.len()).map(|idx| {
             self.list
@@ -209,5 +214,29 @@ impl Assets {
             self.list.try_reserve(self.list.len().max(1))?;
         }
         Ok(self.list.push_mut(asset))
+    }
+
+    /// Returns [`None`] if the asset isn't in the list.
+    /// This could be because the asset has been removed while an upgraded clone exists.
+    pub fn raster_pos(&self, asset: &Rc<RefCell<RenderTexture2D>>) -> Option<AssetPos> {
+        self.list
+            .iter()
+            .position(|x| {
+                matches!(&x.data,
+                AssetContent::Raster { rtex, .. } if Rc::ptr_eq(rtex, asset))
+            })
+            .map(AssetPos::Index)
+    }
+
+    /// Returns [`None`] if the asset isn't in the list.
+    /// This could be because the asset has been removed while an upgraded clone exists.
+    pub fn shader_pos(&self, asset: &Rc<RefCell<Shader>>) -> Option<AssetPos> {
+        self.list
+            .iter()
+            .position(|x| {
+                matches!(&x.data,
+                AssetContent::Shader { shader, .. } if Rc::ptr_eq(shader, asset))
+            })
+            .map(AssetPos::Index)
     }
 }

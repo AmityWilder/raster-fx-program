@@ -109,7 +109,7 @@ pub enum Command {
     ///
     /// If it is an `.amyfx` file, the current file will be closed and the provided one will open
     ///
-    /// If it is a `.frag`/`.fs`, it will be loaded into resources as a fragment shader.
+    /// If it is a `.frag`/`.fs`, it will be loaded into resources as a fragment shader.\
     /// If it is a `.vert`/`.vs`, it will be loaded into resources as a vertex shader.
     #[command(name = "open", visible_alias = "o")]
     Open {
@@ -118,6 +118,11 @@ pub enum Command {
         name: Option<String>,
 
         /// Path to the file to open
+        ///
+        /// Sensitive to file extension:
+        ///
+        /// - ".png" will be loaded as a raster asset
+        /// - ".amyfx" will be loaded as an amyfx document
         #[arg(short, long, exclusive = true)]
         path: Option<PathBuf>,
 
@@ -204,9 +209,10 @@ impl Command {
                 match (layer, asset) {
                     // from asset - effect
                     (None, Some(from)) => {
-                        let asset = assets.get(from).map_err(LinkError::from)?;
-                        let layer = layers.get_mut(to).map_err(LinkError::from)?;
-                        layer.link(asset)?;
+                        layers
+                            .get_mut(to)
+                            .map_err(LinkError::from)?
+                            .link(assets, from)?;
                         println!("applied effect");
                     }
 
