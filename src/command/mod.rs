@@ -1,17 +1,15 @@
 use crate::{
-    asset::Asset,
-    command::layer_pos::{
-        IndexError, InsertLayerError, LayerIndexMut, LayerInsert, SelectLayerError,
-    },
-    layer::{Effect, EffectBuilder, Layer, rtex_from_image},
+    asset::{Asset, Assets, RasterSrc, ShaderSrc},
+    asset_pos::AssetPos,
+    layer::{Layer, Layers},
+    layer_pos::LayerPos,
 };
-use clap::{Parser, ValueHint};
+use clap::Parser;
 use raylib::prelude::*;
-use std::{fs, io, ops::ControlFlow, path::PathBuf};
-use thiserror::Error;
+use std::{ops::ControlFlow, path::PathBuf};
 
-pub mod layer_pos;
-use layer_pos::{AssetPos, LayerPos};
+pub mod error;
+use error::*;
 
 pub const ILLEGAL_LAYER_NAME_CHARS: [char; 6] = ['\n', '\r', '\t', '\\', '"', ';'];
 
@@ -31,7 +29,7 @@ fn valid_layer_name(s: &str) -> Result<String, LayerNameError> {
 #[command(version)]
 pub enum Command {
     /// List the current layers in the open editor
-    #[command(name = "layers", visible_alias = "ls")]
+    #[command(name = "list", visible_alias = "ls")]
     List {
         /// List assets instead of layers
         #[arg(short = 'a', long = "assets", action = clap::ArgAction::SetTrue)]
@@ -72,11 +70,11 @@ pub enum Command {
         to: LayerPos,
     },
 
-    /// Reload all effects on a layer
+    /// Reload an asset
     #[command(name = "reload", visible_alias = "re")]
     Reload {
-        /// Which layer to reload the effects on
-        on: LayerPos,
+        /// Which asset to reload
+        on: AssetPos,
     },
 
     /// Create one or more new layers
@@ -95,7 +93,7 @@ pub enum Command {
         /// List of layer indices to remove
         ///
         /// Empty implies current
-        position: Vec<usize>,
+        positions: Vec<LayerPos>,
     },
 
     /// Change which layer is currently being targeted
@@ -115,9 +113,21 @@ pub enum Command {
     /// If it is a `.vert`/`.vs`, it will be loaded into resources as a vertex shader.
     #[command(name = "open", visible_alias = "o")]
     Open {
+        /// The name of the asset
+        #[arg(short, long)]
+        name: Option<String>,
+
         /// Path to the file to open
-        #[arg(value_hint = ValueHint::FilePath)]
-        path: PathBuf,
+        #[arg(short, long, exclusive = true)]
+        path: Option<PathBuf>,
+
+        /// Path to the fragment shader
+        #[arg(short, long = "frag")]
+        fs_path: Option<PathBuf>,
+
+        /// Path to the vertex shader
+        #[arg(short, long = "vert")]
+        vs_path: Option<PathBuf>,
     },
 
     /// Close the application
@@ -125,442 +135,163 @@ pub enum Command {
     Quit,
 }
 
-#[derive(Debug, Error)]
-pub enum RunCommandError {
-    #[error("failed to create layer")]
-    NewLayer(#[from] NewLayerError),
-
-    #[error("invalid layer name")]
-    LayerName(#[from] LayerNameError),
-
-    #[error("failed to switch layers")]
-    SwitchLayer(#[from] SwitchLayerError),
-
-    #[error("failed to open file")]
-    OpenFile(#[from] OpenFileError),
-
-    #[error("failed to add effect")]
-    AddEffect(#[from] AddEffectError),
-
-    #[error("failed to reload effect")]
-    ReloadEffect(#[from] ReloadEffectError),
-
-    #[error("failed to reorder layers")]
-    ReorderLayers(#[from] ReorderLayersError),
-
-    #[error("failed to remove layers")]
-    RemoveLayer(#[from] RemoveLayerError),
-}
-
-#[derive(Debug, Error)]
-pub enum CommandError {
-    #[error("failed to parse command")]
-    Parse(#[from] clap::Error),
-
-    #[error("failed to execute command")]
-    Run(#[from] RunCommandError),
-}
-
 impl Command {
     pub fn run(
         self,
         rl: &mut RaylibHandle,
         thread: &RaylibThread,
-        assets: &mut Vec<Asset>,
-        layers: &mut Vec<Layer>,
-        curr_layer: &mut usize,
+        assets: &mut Assets,
+        layers: &mut Layers,
     ) -> Result<ControlFlow<()>, RunCommandError> {
         match self {
             Self::List { list_assets, dbg } => {
-                list_layers(assets, layers, *curr_layer, list_assets, dbg)
+                if list_assets {
+                    println!("\x1b[96massets: {{\x1b[0m");
+                    for (i, asset) in assets.iter().enumerate().rev() {
+                        print!("  \x1b[92m{i}:\x1b[0m ");
+                        if dbg {
+                            println!("{asset:#?}");
+                        } else {
+                            println!("{}", asset.name);
+                        }
+                    }
+                    println!("\x1b[96m}}\x1b[0m");
+                } else {
+                    println!("\x1b[96mlayers: {{\x1b[0m");
+                    for (i, layer) in layers.iter().enumerate().rev() {
+                        let (color, open, close) = if i
+                            == layers
+                                .curr()
+                                .expect("should be Some if layers is non-empty")
+                        {
+                            (95, '[', ']')
+                        } else {
+                            (92, ' ', ' ')
+                        };
+                        print!("  \x1b[{color}m{open}{i}{close}:\x1b[0m ");
+                        if dbg {
+                            println!("{layer:#?}");
+                        } else {
+                            println!("{}", layer.name);
+                        }
+                    }
+                    println!("\x1b[96m}}\x1b[0m");
+                }
             }
-            Self::Create { at, name, is_group } => {
-                new_layer(rl, thread, layers, curr_layer, at, name, is_group)?
+
+            Self::Create {
+                mut at,
+                name,
+                is_group,
+            } => {
+                rl.load_render_texture(thread, 0, 0)
+                    .map_err(NewLayerError::Raylib)
+                    .and_then(|buffer| {
+                        layers.insert(
+                            at,
+                            if is_group {
+                                Layer::new_group(name, buffer)
+                            } else {
+                                Layer::new_raster(name, buffer)
+                            },
+                        )?;
+                        at = LayerPos::Next;
+                        Ok(())
+                    })?;
             }
-            Self::Link { layer, asset, to } => link(assets, layers, *curr_layer, layer, asset, to),
-            Self::Reload { on } => reload_effects(rl, thread, layers, *curr_layer, on)?,
-            Self::Reorder { from, to } => reorder_layers(layers, curr_layer, from, to)?,
-            Self::Remove { position } => remove_layers(layers, curr_layer, position)?,
-            Self::Target { to } => switch_layer(layers, curr_layer, to)?,
-            Self::Open { path } => open(rl, thread, layers, curr_layer, path)?,
+
+            Self::Link { layer, asset, to } => {
+                match (layer, asset) {
+                    // from asset - effect
+                    (None, Some(from)) => {
+                        let asset = assets.get(from).map_err(LinkError::from)?;
+                        let layer = layers.get_mut(to).map_err(LinkError::from)?;
+                        layer.link(asset)?;
+                        println!("applied effect");
+                    }
+
+                    // from layer - clone layer
+                    (Some(_from), None) => {
+                        println!("not yet implemented");
+                    }
+
+                    _ => unreachable!("group must have exactly one option"),
+                };
+            }
+
+            Self::Reload { on } => {
+                let asset = assets.get_mut(on).map_err(ReloadAssetError::from)?;
+                asset.reload(rl, thread)?;
+                println!("\x1b[96masset \"{}\" reloaded\x1b[0m", asset.name);
+            }
+
+            Self::Reorder { from, to } => layers.reorder(from, to)?,
+
+            Self::Remove { positions } => layers.remove(positions)?,
+
+            Self::Target { to } => layers.set_target(to).map_err(SwitchLayerError::Select)?,
+
+            Self::Open {
+                name,
+                path,
+                fs_path,
+                vs_path,
+            } => {
+                use OpenFileError::*;
+                if let Some(path) = path {
+                    assert!(fs_path.is_none() && vs_path.is_none());
+                    if let Some(ext) = path.extension()
+                        && ext.eq_ignore_ascii_case("amyfx")
+                    {
+                        println!("amyfx: not yet implemented");
+                        Err(Invalid)?
+                    } else {
+                        assets
+                            .push(Asset::load_raster(
+                                rl,
+                                thread,
+                                name.or_else(|| {
+                                    path.file_name()
+                                        .map(|filename| filename.to_string_lossy().to_string())
+                                })
+                                .unwrap_or_else(|| format!("asset {}", assets.len())),
+                                RasterSrc::File(path),
+                            )?)
+                            .map_err(OpenFileError::NoMemory)?;
+                    }
+                } else {
+                    if fs_path.is_none() && vs_path.is_none() {
+                        println!("\x1b[1;95mwarning:\x1b[0m no files to open");
+                    } else {
+                        assets
+                            .push(Asset::load_shader(
+                                rl,
+                                thread,
+                                name.or_else(|| {
+                                    let fs_name = fs_path
+                                        .as_ref()
+                                        .and_then(|path| path.file_name())
+                                        .map(|fname| fname.to_string_lossy());
+                                    let vs_name = vs_path
+                                        .as_ref()
+                                        .and_then(|path| path.file_name())
+                                        .map(|fname| fname.to_string_lossy());
+                                    match (fs_name, vs_name) {
+                                        (Some(fs), Some(vs)) => Some(format!("{fs}_{vs}")),
+                                        (Some(x), None) | (None, Some(x)) => Some(x.to_string()),
+                                        (None, None) => None,
+                                    }
+                                })
+                                .unwrap_or_else(|| format!("asset {}", assets.len())),
+                                ShaderSrc { fs_path, vs_path },
+                            )?)
+                            .map_err(OpenFileError::NoMemory)?;
+                    }
+                }
+            }
+
             Self::Quit {} => return Ok(ControlFlow::Break(())),
         }
         Ok(ControlFlow::Continue(()))
     }
-}
-
-fn list_layers(
-    assets: &[Asset],
-    layers: &[Layer],
-    curr_layer: usize,
-    list_assets: bool,
-    debug: bool,
-) {
-    if list_assets {
-        println!("\x1b[96massets: {{\x1b[0m");
-        for (i, asset) in assets.iter().enumerate().rev() {
-            print!("  \x1b[92m{i}:\x1b[0m ");
-            if debug {
-                println!("{asset:#?}");
-            } else {
-                println!("{}", asset.name);
-            }
-        }
-        println!("\x1b[96m}}\x1b[0m");
-    } else {
-        println!("\x1b[96mlayers: {{\x1b[0m");
-        for (i, layer) in layers.iter().enumerate().rev() {
-            let (color, open, close) = if i == curr_layer {
-                (95, '[', ']')
-            } else {
-                (92, ' ', ' ')
-            };
-            print!("  \x1b[{color}m{open}{i}{close}:\x1b[0m ");
-            if debug {
-                println!("{layer:#?}");
-            } else {
-                println!("{}", layer.name);
-            }
-        }
-        println!("\x1b[96m}}\x1b[0m");
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Error)]
-pub enum LayerNameError {
-    #[error("layer name cannot be entirely empty or whitespace")]
-    Empty,
-
-    #[error(
-        "layer names cannot contain any of the following characters: {:?}",
-        ILLEGAL_LAYER_NAME_CHARS
-    )]
-    Illegal,
-}
-
-#[derive(Debug, Error)]
-pub enum NewLayerError {
-    #[error("bad layer insertion")]
-    InsertLayer(#[from] InsertLayerError),
-
-    #[error("bad layer name")]
-    LayerName(#[from] LayerNameError),
-
-    #[error("could not create a new raster")]
-    Raylib(#[from] raylib::error::Error),
-}
-
-fn new_layer(
-    rl: &mut RaylibHandle,
-    thread: &RaylibThread,
-    layers: &mut Vec<Layer>,
-    curr_layer: &mut usize,
-    mut at: LayerPos,
-    name: String,
-    is_group: bool,
-) -> Result<(), NewLayerError> {
-    rl.load_render_texture(thread, 0, 0)
-        .map_err(NewLayerError::Raylib)
-        .and_then(|buffer| {
-            insert_layer(
-                layers,
-                curr_layer,
-                at,
-                if is_group {
-                    Layer::new_group(name, buffer)
-                } else {
-                    Layer::new_raster(name, buffer)
-                },
-            )?;
-            at = LayerPos::Next;
-            Ok(())
-        })
-}
-
-fn insert_layer<'a>(
-    layers: &'a mut Vec<Layer>,
-    curr_layer: &mut usize,
-    at: LayerPos,
-    layer: Layer,
-) -> Result<&'a mut Layer, NewLayerError> {
-    let (pos, new_layer) = layers.insert_layer(*curr_layer, at, layer)?;
-    *curr_layer = pos;
-    println!("\x1b[96mcreated layer\x1b[0m \"{}\"", new_layer.name);
-    Ok(new_layer)
-}
-
-fn link(
-    assets: &[Asset],
-    layers: &[Layer],
-    curr_layer: usize,
-    from_layer: Option<LayerPos>,
-    from_asset: Option<AssetPos>,
-    to: LayerPos,
-) {
-    match (from_layer, from_asset) {
-        // from layer - clone layer
-        (Some(_from), None) => {
-            println!("not yet implemented");
-        }
-
-        // from asset - effect
-        (None, Some(from)) => {
-            println!("applied effect");
-        }
-
-        _ => unreachable!("group must have exactly one option"),
-    }
-}
-
-#[derive(Debug, Error)]
-pub enum AddEffectError {
-    #[error("cannot apply effect to specified layer")]
-    Select(#[from] SelectLayerError),
-
-    #[error("failed to load shader from file")]
-    Io(#[from] io::Error),
-}
-
-fn add_effect<'a>(
-    rl: &mut RaylibHandle,
-    thread: &RaylibThread,
-    layers: &'a mut [Layer],
-    curr_layer: usize,
-    to: LayerPos,
-    effect: EffectBuilder,
-) -> Result<&'a mut Effect, AddEffectError> {
-    let layer = layers.select_mut(curr_layer, to)?;
-    let n = layer.effects.len();
-    Ok(layer.effects.push_mut(
-        effect
-            .build(rl, thread)
-            .inspect(|_| println!("\x1b[96meffect {n} added to layer\x1b[0m"))?,
-    ))
-}
-
-#[derive(Debug, Error)]
-pub enum ReloadEffectError {
-    #[error("cannot reload effects on specified layer")]
-    Select(#[from] SelectLayerError),
-
-    #[error("failed to reload shader from file")]
-    Io(#[from] io::Error),
-}
-
-fn reload_effects(
-    rl: &mut RaylibHandle,
-    thread: &RaylibThread,
-    layers: &mut [Layer],
-    curr_layer: usize,
-    on: LayerPos,
-) -> Result<(), ReloadEffectError> {
-    let layer = layers.select_mut(curr_layer, on)?;
-    if layer.effects.is_empty() {
-        println!("\x1b[1;95mwarning:\x1b[0m layer has no effects")
-    } else {
-        for (i, effect) in layer.effects.iter_mut().enumerate() {
-            effect.reload(rl, thread)?;
-            println!("\x1b[96meffect {i} reloaded\x1b[0m");
-        }
-    }
-    Ok(())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Error)]
-pub enum ReorderLayersError {
-    #[error("cannot move layer")]
-    SrcIndexOutOfBounds(SelectLayerError),
-
-    #[error("cannot replace layer")]
-    DstIndexOutOfBounds(SelectLayerError),
-}
-
-fn reorder_layers(
-    layers: &mut [Layer],
-    curr_layer: &mut usize,
-    from: LayerPos,
-    to: LayerPos,
-) -> Result<(), ReorderLayersError> {
-    use ReorderLayersError::*;
-    use std::cmp::Ordering::*;
-    let from = from
-        .select_layer_idx(*curr_layer, layers.len())
-        .map_err(SrcIndexOutOfBounds)?;
-    let to = to
-        .select_layer_idx(*curr_layer, layers.len())
-        .map_err(DstIndexOutOfBounds)?;
-    match from.cmp(&to) {
-        Less => layers[from..=to].rotate_left(1),
-        Equal => {
-            println!("\x1b[1;95mwarning:\x1b[0m layer order unchanged");
-        }
-        Greater => layers[to..=from].rotate_right(1),
-    }
-    Ok(())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Error)]
-pub enum RemoveLayerError {
-    #[error("cannot remove layer")]
-    Select(#[from] SelectLayerError),
-}
-
-fn remove_layers(
-    layers: &mut Vec<Layer>,
-    curr_layer: &mut usize,
-    mut positions: Vec<usize>,
-) -> Result<(), RemoveLayerError> {
-    use RemoveLayerError::*;
-    positions.sort();
-    positions.dedup();
-    match positions.last().copied() {
-        Some(n) => {
-            if n < layers.len() {
-                let mut layer_index = 0..layers.len();
-                *curr_layer = (*curr_layer).saturating_sub(
-                    positions
-                        .iter()
-                        .copied()
-                        .take_while(|i| i <= curr_layer)
-                        .count(),
-                );
-                let mut pos = positions.into_iter().peekable();
-                layers.retain(|layer| {
-                    // SAFETY: positions cannot be negative, duplicative, or exceed the maximum layer index.
-                    // there cannot be more positions than layers.
-                    pos.next_if_eq(&unsafe { layer_index.next().unwrap_unchecked() })
-                        .inspect(|_| println!("\x1b[96mremoving\x1b[0m {}", layer.name))
-                        .is_some()
-                });
-                Ok(())
-            } else {
-                Err(Select(SelectLayerError::IndexOutOfBounds(
-                    IndexError::Value(n),
-                )))
-            }
-        }
-        None => {
-            if layers.is_empty() {
-                assert_eq!(
-                    *curr_layer, 0,
-                    "curr_layer should always be zero if there are no layers"
-                );
-                Err(Select(SelectLayerError::IndexOutOfBounds(
-                    IndexError::Value(0),
-                )))
-            } else {
-                assert!(
-                    *curr_layer < layers.len(),
-                    "curr_layer should always be a valid index if there are layers"
-                );
-                layers.remove(*curr_layer);
-                *curr_layer = (*curr_layer).min(layers.len().saturating_sub(1));
-                Ok(())
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Error)]
-pub enum SwitchLayerError {
-    #[error("cannot switch to layer")]
-    Select(#[from] SelectLayerError),
-}
-
-fn switch_layer(
-    layers: &[Layer],
-    curr_layer: &mut usize,
-    to: LayerPos,
-) -> Result<(), SwitchLayerError> {
-    to.select_layer_idx(*curr_layer, layers.len())
-        .map(|pos| *curr_layer = pos)
-        .map_err(SwitchLayerError::Select)
-}
-
-#[derive(Debug, Error)]
-pub enum OpenFileError {
-    #[error("invalid or corrupted file")]
-    Invalid,
-
-    #[error("unsupported file format")]
-    Unsupported,
-
-    #[error("failed to load image file")]
-    LoadImage(#[from] raylib::error::Error),
-
-    #[error("could not create a new layer to insert the image")]
-    NewLayer(#[from] NewLayerError),
-
-    #[error("IO system error")]
-    Io(#[from] io::Error),
-}
-
-fn open(
-    rl: &mut RaylibHandle,
-    thread: &RaylibThread,
-    layers: &mut Vec<Layer>,
-    curr_layer: &mut usize,
-    path: PathBuf,
-) -> Result<(), OpenFileError> {
-    use OpenFileError::*;
-    {
-        let display_path;
-        println!(
-            "path resolves to: {:?}",
-            match path.canonicalize() {
-                Ok(canon_path) => {
-                    display_path = canon_path;
-                    &display_path
-                }
-                Err(_) => &path,
-            }
-            .display()
-        );
-    }
-
-    fs::read(&path)
-        .map_err(Io)
-        .and_then(|data| match path.extension() {
-            Some(ext) if ext.eq_ignore_ascii_case("amyfx") => open_amyfx(),
-            Some(ext) if ext.eq_ignore_ascii_case("png") => {
-                open_png(rl, thread, layers, curr_layer, path, &data)
-            }
-            _ => Err(Unsupported),
-        })
-}
-
-fn open_amyfx() -> Result<(), OpenFileError> {
-    use OpenFileError::*;
-    println!("amyfx: not yet implemented");
-    Err(Invalid)
-}
-
-fn open_png(
-    rl: &mut RaylibHandle,
-    thread: &RaylibThread,
-    layers: &mut Vec<Layer>,
-    curr_layer: &mut usize,
-    path: PathBuf,
-    data: &[u8],
-) -> Result<(), OpenFileError> {
-    use OpenFileError::*;
-
-    let buffer = Image::load_image_from_mem(".png", data)
-        .and_then(|img| rtex_from_image(rl, thread, &img))
-        .map_err(LoadImage)?;
-
-    insert_layer(
-        layers,
-        curr_layer,
-        LayerPos::Next,
-        Layer::new_raster(
-            path.file_name()
-                .expect("file should have file name")
-                .to_string_lossy()
-                .to_string(),
-            buffer,
-        ),
-    )
-    .map_err(NewLayer)
-    .map(|_| ())
 }

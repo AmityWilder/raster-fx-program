@@ -4,9 +4,9 @@
 #![warn(clippy::missing_const_for_fn)]
 
 use crate::{
-    asset::Asset,
-    command::{Command, CommandError},
-    layer::Layer,
+    asset::Assets,
+    command::{Command, error::CommandError},
+    layer::Layers,
 };
 use clap::Parser;
 use raylib::prelude::*;
@@ -18,10 +18,12 @@ use std::{
     thread,
 };
 
-mod asset;
+pub mod asset;
+pub mod asset_pos;
 mod command;
-mod layer;
-mod rlgl;
+pub mod layer;
+pub mod layer_pos;
+pub mod rlgl;
 
 pub fn print_err_recursive(mut e: &dyn std::error::Error) {
     loop {
@@ -92,9 +94,8 @@ fn main() {
     rl.set_target_fps(30);
 
     let mut history: VecDeque<String> = VecDeque::new();
-    let mut assets: Vec<Asset> = Vec::new();
-    let mut layers: Vec<Layer> = Vec::new();
-    let mut curr_layer: usize = 0;
+    let mut assets = Assets::new();
+    let mut layers = Layers::new();
 
     'mainloop: while !rl.window_should_close() {
         match stdin_channel.try_recv() {
@@ -103,7 +104,7 @@ fn main() {
                     match Command::try_parse_from(std::iter::once("").chain(ArgsIter::new(input)))
                         .map_err(CommandError::Parse)
                         .and_then(|cmd| {
-                            cmd.run(&mut rl, &thread, &mut assets, &mut layers, &mut curr_layer)
+                            cmd.run(&mut rl, &thread, &mut assets, &mut layers)
                                 .map_err(CommandError::Run)
                         }) {
                         Ok(ControlFlow::Continue(())) => {}
@@ -120,7 +121,7 @@ fn main() {
                                 }
 
                                 CommandError::Parse(e) => {
-                                    println!("\x1b[1;91merror:\x1b[0m {}", e.render());
+                                    println!("\x1b[1;91mparse error:\x1b[0m {}", e.render());
                                 }
 
                                 _ => {
@@ -141,12 +142,24 @@ fn main() {
         }
 
         for layer in layers.iter_mut() {
-            layer.prep_buffer_recursively(&mut rl, &thread);
+            if let Err(e) = layer.prep_buffer_recursively(&mut rl, &thread) {
+                #[cfg(debug_assertions)]
+                {
+                    eprint!("\x1b[1;91mdraw error:\x1b[0m ");
+                    print_err_recursive(&e);
+                }
+            }
         }
         let mut d = rl.begin_drawing(&thread);
         d.clear_background(Color::BLACK);
         for layer in layers.iter_mut() {
-            layer.draw_buffer(&mut d, Matrix::identity());
+            if let Err(e) = layer.draw_buffer(&mut d, Matrix::identity()) {
+                #[cfg(debug_assertions)]
+                {
+                    eprint!("\x1b[1;91mdraw error:\x1b[0m ");
+                    print_err_recursive(&e);
+                }
+            }
         }
     }
 }

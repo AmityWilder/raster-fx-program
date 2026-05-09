@@ -4,7 +4,7 @@ use raylib::prelude::*;
 use std::marker::PhantomData;
 
 /// Guarantees drawing is active and we are on the Raylib thread
-pub struct RlTexture<'a, 'b, D, T>(&'a mut D, PhantomData<(&'b T, *mut ())>);
+pub struct RlTexture<'a, 'b, D, T>(PhantomData<(&'a mut D, &'b T, *mut ())>);
 
 impl<D, T> Drop for RlTexture<'_, '_, D, T> {
     fn drop(&mut self) {
@@ -16,12 +16,12 @@ impl<D, T> Drop for RlTexture<'_, '_, D, T> {
 }
 
 impl<'a, 'b, D: RaylibDraw, T: RaylibTexture2D> RlTexture<'a, 'b, D, T> {
-    fn new(d: &'a mut D, texture: &'b T) -> Self {
+    fn new(_: &'a mut D, texture: &'b T) -> Self {
         // SAFETY: RaylibDraw proves drawing is active
         unsafe {
             ffi::rlSetTexture(texture.as_ref().id);
         }
-        Self(d, PhantomData)
+        Self(PhantomData)
     }
 }
 
@@ -184,7 +184,7 @@ pub unsafe trait Rlgl {
     }
 }
 
-pub struct RlLines<'a, D>(&'a mut D);
+pub struct RlLines<'a, D>(PhantomData<&'a mut D>);
 
 impl<D> Drop for RlLines<'_, D> {
     fn drop(&mut self) {
@@ -196,12 +196,12 @@ impl<D> Drop for RlLines<'_, D> {
 }
 
 impl<'a, D: RlglExt> RlLines<'a, D> {
-    fn new(d: &'a mut D) -> Self {
+    fn new(_: &'a mut D) -> Self {
         // SAFETY: Guaranteed by RlglExt
         unsafe {
             ffi::rlBegin(ffi::RL_LINES as i32);
         }
-        Self(d)
+        Self(PhantomData)
     }
 
     pub fn line(&mut self, verts: [(impl RlTexCoord, impl RlVertex); 2]) {
@@ -218,7 +218,7 @@ impl<'a, D: RlglExt> RlLines<'a, D> {
 // SAFETY: Rlgl is activated on construction and does not end until dropped
 unsafe impl<D: RlglExt> Rlgl for RlLines<'_, D> {}
 
-pub struct RlTriangles<'a, D>(&'a mut D);
+pub struct RlTriangles<'a, D>(PhantomData<&'a mut D>);
 
 impl<D> Drop for RlTriangles<'_, D> {
     fn drop(&mut self) {
@@ -230,12 +230,12 @@ impl<D> Drop for RlTriangles<'_, D> {
 }
 
 impl<'a, D: RlglExt> RlTriangles<'a, D> {
-    fn new(d: &'a mut D) -> Self {
+    fn new(_: &'a mut D) -> Self {
         // SAFETY: Guaranteed by RlglExt
         unsafe {
             ffi::rlBegin(ffi::RL_TRIANGLES as i32);
         }
-        Self(d)
+        Self(PhantomData)
     }
 
     pub fn triangle(&mut self, verts: [(impl RlTexCoord, impl RlVertex); 3]) {
@@ -252,7 +252,7 @@ impl<'a, D: RlglExt> RlTriangles<'a, D> {
 // SAFETY: Rlgl is activated on construction and does not end until dropped
 unsafe impl<D: RlglExt> Rlgl for RlTriangles<'_, D> {}
 
-pub struct RlQuads<'a, D>(&'a mut D);
+pub struct RlQuads<'a, D>(PhantomData<&'a mut D>);
 
 impl<D> Drop for RlQuads<'_, D> {
     fn drop(&mut self) {
@@ -264,12 +264,12 @@ impl<D> Drop for RlQuads<'_, D> {
 }
 
 impl<'a, D: RlglExt> RlQuads<'a, D> {
-    fn new(d: &'a mut D) -> Self {
+    fn new(_: &'a mut D) -> Self {
         // SAFETY: Guaranteed by RlglExt
         unsafe {
             ffi::rlBegin(ffi::RL_QUADS as i32);
         }
-        Self(d)
+        Self(PhantomData)
     }
 
     pub fn quad(&mut self, verts: [(impl RlTexCoord, impl RlVertex); 4]) {

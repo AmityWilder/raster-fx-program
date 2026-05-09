@@ -1,13 +1,15 @@
-use crate::rlgl::*;
-use clap::Args;
+use crate::{
+    command::error::{NewLayerError, RemoveLayerError, ReorderLayersError},
+    layer_pos::{InsertLayerError, LayerPos, SelectLayerError},
+    rlgl::*,
+};
 use raylib::prelude::*;
 use std::{
     cell::{Ref, RefCell, RefMut},
-    fs,
-    marker::PhantomData,
-    path::PathBuf,
-    rc::Rc,
+    collections::BTreeSet,
+    rc::{Rc, Weak},
 };
+use thiserror::Error;
 
 pub fn rtex_from_image(
     rl: &mut RaylibHandle,
@@ -60,101 +62,9 @@ pub fn rtex_from_image(
     })
 }
 
-struct ShaderMode<'a>(PhantomData<&'a mut Shader>);
-
-impl<'a> ShaderMode<'a> {
-    fn begin(shader: &'a mut Shader) -> Self {
-        #[warn(clippy::undocumented_unsafe_blocks, reason = "TBD")]
-        unsafe {
-            ffi::BeginShaderMode(*shader.as_ref());
-        }
-        Self(PhantomData)
-    }
-}
-
-impl Drop for ShaderMode<'_> {
-    fn drop(&mut self) {
-        #[warn(clippy::undocumented_unsafe_blocks, reason = "TBD")]
-        unsafe {
-            ffi::EndShaderMode();
-        }
-    }
-}
-
 #[derive(Debug)]
 pub struct Effect {
-    builder: EffectBuilder,
-    pub shader: Shader,
-}
-
-impl Effect {
-    pub fn reload(
-        &mut self,
-        rl: &mut RaylibHandle,
-        thread: &RaylibThread,
-    ) -> Result<(), std::io::Error> {
-        self.shader = self.builder.load_shader(rl, thread)?;
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Args)]
-pub struct EffectBuilder {
-    /// Path to the vertex shader code file
-    #[arg(short, long = "vert")]
-    vs_path: Option<PathBuf>,
-
-    /// Path to the fragment shader code file
-    #[arg(short, long = "frag")]
-    fs_path: Option<PathBuf>,
-}
-
-impl EffectBuilder {
-    fn load_shader(
-        &self,
-        rl: &mut RaylibHandle,
-        thread: &RaylibThread,
-    ) -> Result<Shader, std::io::Error> {
-        let (vs_code, fs_code);
-        Ok(rl.load_shader_from_memory(
-            thread,
-            match &self.vs_path {
-                Some(path) => {
-                    vs_code = fs::read_to_string(path)?;
-                    Some(vs_code.as_str())
-                }
-                None => None,
-            },
-            match &self.fs_path {
-                Some(path) => {
-                    fs_code = fs::read_to_string(path)?;
-                    Some(fs_code.as_str())
-                }
-                None => None,
-            },
-        ))
-    }
-
-    pub fn build(
-        self,
-        rl: &mut RaylibHandle,
-        thread: &RaylibThread,
-    ) -> Result<Effect, std::io::Error> {
-        self.load_shader(rl, thread).map(|shader| Effect {
-            builder: self,
-            shader,
-        })
-    }
-}
-
-trait EffectSlice {
-    fn apply(
-        &mut self,
-        d: &mut impl RaylibDraw,
-        texture: &impl RaylibTexture2D,
-        tint: Color,
-        transform: &Matrix,
-    );
+    pub asset: Weak<RefCell<Shader>>,
 }
 
 fn draw_texture_quad(
@@ -189,6 +99,25 @@ fn draw_texture_quad(
     ]);
 }
 
+#[derive(Debug, Error)]
+pub enum ApplyEffectsError {
+    #[error("too many shaders, stack overflow")]
+    ShaderOverflow,
+
+    #[error("effect asset deleted but still referenced on layer")]
+    EffectDeleted,
+}
+
+trait EffectSlice {
+    fn apply(
+        &mut self,
+        d: &mut impl RaylibDraw,
+        texture: &impl RaylibTexture2D,
+        tint: Color,
+        transform: &Matrix,
+    ) -> Result<(), ApplyEffectsError>;
+}
+
 impl EffectSlice for [Effect] {
     fn apply(
         &mut self,
@@ -196,14 +125,56 @@ impl EffectSlice for [Effect] {
         texture: &impl RaylibTexture2D,
         tint: Color,
         transform: &Matrix,
-    ) {
-        if let [first, rest @ ..] = self {
-            let mut _mode = ShaderMode::begin(&mut first.shader);
-            rest.apply(d, texture, tint, transform);
-        } else {
-            // empty
-            draw_texture_quad(d, texture, *transform, tint)
+    ) -> Result<(), ApplyEffectsError> {
+        struct Guard {
+            /// The number of shaders that have been begun so far.
+            begun: usize,
         }
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                for _ in 0..self.begun {
+                    // SAFETY: Guard guarantees that this many shaders have been begun and have not been ended
+                    unsafe {
+                        ffi::EndShaderMode();
+                    }
+                }
+            }
+        }
+        impl Guard {
+            /// # Safety
+            /// Containing draw modifiers must not end before this guard is dropped
+            unsafe fn begin(
+                &mut self,
+                shader: impl AsRef<ffi::Shader>,
+            ) -> Result<(), ApplyEffectsError> {
+                // if we can't track any more shaders, don't try beginning it
+                self.begun = self
+                    .begun
+                    .checked_add(1)
+                    .ok_or(ApplyEffectsError::ShaderOverflow)?;
+                // SAFETY: Existence of RaylibDraw ensures safe to begin shader mode, mode will end when dropped
+                unsafe {
+                    ffi::BeginShaderMode(*shader.as_ref());
+                }
+                Ok(())
+            }
+        }
+
+        let mut guard = Guard { begun: 0 };
+        for effect in self {
+            let shader = effect
+                .asset
+                .upgrade()
+                .ok_or(ApplyEffectsError::EffectDeleted)?;
+            let shader = shader.borrow();
+            // SAFETY: RaylibDraw guarantees we are drawing, borrow ensures it cannot drop until the function ends
+            unsafe {
+                guard.begin(&*shader)?;
+            }
+        }
+        draw_texture_quad(d, texture, *transform, tint);
+        drop(guard);
+        Ok(())
     }
 }
 
@@ -365,32 +336,194 @@ impl Layer {
         &mut self,
         rl: &mut RaylibHandle,
         thread: &RaylibThread,
-    ) -> bool {
+    ) -> Result<bool, ApplyEffectsError> {
+        let mut err = None;
         let mut is_updated = std::mem::take(&mut self.is_dirty);
         if let LayerContent::Group { children } = &mut self.content {
             // cannot be represented as "any()" because all must be visited to prep them
             for child in children.iter_mut() {
-                is_updated |= child.prep_buffer_recursively(rl, thread);
+                match child.prep_buffer_recursively(rl, thread) {
+                    Ok(change) => is_updated |= change,
+                    Err(e) => err = Some(e),
+                }
             }
             if is_updated {
                 let mut d = rl.begin_texture_mode(thread, &mut self.buffer);
                 d.clear_background(Color::BLANK);
                 for child in children.iter_mut().rev() {
-                    child.draw_buffer(&mut d, self.transform);
+                    if let Err(e) = child.draw_buffer(&mut d, self.transform) {
+                        err = Some(e);
+                    }
                 }
             }
         }
-        is_updated
+        match err {
+            Some(e) => Err(e),
+            None => Ok(is_updated),
+        }
     }
 
     /// Draws the currently cached buffer with effects applied
-    pub fn draw_buffer(&mut self, d: &mut impl RaylibDraw, transform: Matrix) {
-        self.effects.as_mut_slice().apply(
+    pub fn draw_buffer(
+        &mut self,
+        d: &mut impl RaylibDraw,
+        transform: Matrix,
+    ) -> Result<(), ApplyEffectsError> {
+        self.effects.apply(
             &mut d.begin_blend_mode(self.blend.mode),
             &self.buffer,
             self.blend.tint,
             #[allow(clippy::arithmetic_side_effects)]
             &(transform * self.transform),
+        )
+    }
+}
+
+/// Uses [`LayerPos`] instead of [`usize`]
+#[derive(Debug, Default)]
+pub struct Layers {
+    list: Vec<Layer>,
+    curr: usize,
+}
+
+impl Layers {
+    pub const fn new() -> Self {
+        Self {
+            list: Vec::new(),
+            curr: 0,
+        }
+    }
+
+    pub const fn len(&self) -> usize {
+        self.list.len()
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.list.is_empty()
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, Layer> {
+        self.list.iter()
+    }
+
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, Layer> {
+        self.list.iter_mut()
+    }
+
+    #[cfg(debug_assertions)]
+    fn validate_curr(&self) {
+        match self.list.as_slice() {
+            [] => {
+                assert_eq!(
+                    self.curr, 0,
+                    "layers.curr should always be zero if there are no layers"
+                );
+            }
+            list => {
+                assert!(
+                    self.curr < list.len(),
+                    "layers.curr should always be a valid index if there are layers"
+                );
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn curr(&self) -> Option<usize> {
+        #[cfg(debug_assertions)]
+        self.validate_curr();
+        (!self.list.is_empty()).then_some(self.curr)
+    }
+
+    pub fn insert_idx(&self, at: LayerPos) -> Result<usize, InsertLayerError> {
+        at.insert_layer_idx(self.curr, self.list.len())
+    }
+
+    pub fn select_idx(&self, at: LayerPos) -> Result<usize, SelectLayerError> {
+        at.select_layer_idx(self.curr, self.list.len())
+    }
+
+    pub fn insert(&mut self, at: LayerPos, layer: Layer) -> Result<&mut Layer, NewLayerError> {
+        let pos = at.insert_layer_idx(self.curr, self.list.len())?;
+        let new_layer = self.list.insert_mut(pos, layer);
+        self.curr = pos;
+        println!("\x1b[96mcreated layer\x1b[0m \"{}\"", new_layer.name);
+        Ok(new_layer)
+    }
+
+    pub fn get(&self, at: LayerPos) -> Result<&Layer, SelectLayerError> {
+        self.select_idx(at).map(|idx| {
+            self.list
+                .get(idx)
+                .expect("LayerPos should be a valid index in the non-error branch")
+        })
+    }
+
+    pub fn get_mut(&mut self, at: LayerPos) -> Result<&mut Layer, SelectLayerError> {
+        self.select_idx(at).map(|idx| {
+            self.list
+                .get_mut(idx)
+                .expect("LayerPos should be a valid index in the non-error branch")
+        })
+    }
+
+    pub fn reorder(&mut self, from: LayerPos, to: LayerPos) -> Result<(), ReorderLayersError> {
+        use ReorderLayersError::*;
+        use std::cmp::Ordering::*;
+        let from = self.select_idx(from).map_err(SrcIndexOutOfBounds)?;
+        let to = self.select_idx(to).map_err(DstIndexOutOfBounds)?;
+        match from.cmp(&to) {
+            Less => self.list[from..=to].rotate_left(1),
+            Equal => println!("\x1b[1;95mwarning:\x1b[0m layer order unchanged"),
+            Greater => self.list[to..=from].rotate_right(1),
+        }
+        Ok(())
+    }
+
+    pub fn remove(
+        &mut self,
+        positions: impl IntoIterator<Item = LayerPos>,
+    ) -> Result<(), RemoveLayerError> {
+        let positions = positions
+            .into_iter()
+            .map(|at| self.select_idx(at))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        match positions.last().copied() {
+            Some(n) => {
+                assert!(
+                    n < self.list.len(),
+                    "select_idx should have errored if an out of bounds index existed"
+                );
+            }
+
+            None => {
+                println!("\x1b[1;95mwarning:\x1b[0m no layers removed");
+            }
+        }
+        let mut layer_index = 0..self.list.len();
+        self.curr = self.curr.saturating_sub(
+            positions
+                .iter()
+                .copied()
+                .take_while(|&i| i <= self.curr)
+                .count(),
         );
+        let mut pos = positions.into_iter().peekable();
+        self.list.retain(|layer| {
+            // SAFETY: positions cannot be negative, duplicative, or exceed the maximum layer index.
+            // there cannot be more positions than layers.
+            pos.next_if_eq(&unsafe { layer_index.next().unwrap_unchecked() })
+                .inspect(|_| println!("\x1b[96mremoving\x1b[0m {}", layer.name))
+                .is_some()
+        });
+        Ok(())
+    }
+
+    pub fn set_target(&mut self, at: LayerPos) -> Result<(), SelectLayerError> {
+        let idx = self.select_idx(at)?;
+        self.curr = idx;
+        #[cfg(debug_assertions)]
+        self.validate_curr();
+        Ok(())
     }
 }
