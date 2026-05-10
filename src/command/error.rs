@@ -1,8 +1,7 @@
-use super::ILLEGAL_LAYER_NAME_CHARS;
 use crate::{
-    asset_pos::SelectAssetError,
-    layer::{LoadError, SaveError},
-    layer_pos::{InsertLayerError, SelectLayerError},
+    asset::SelectAssetError,
+    command::ILLEGAL_LAYER_NAME_CHARS,
+    layer::{InsertLayerError, LoadError, SaveError, SelectLayerError},
 };
 use std::{collections::TryReserveError, io};
 use thiserror::Error;

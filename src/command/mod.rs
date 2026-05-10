@@ -1,8 +1,6 @@
 use crate::{
-    asset::{Asset, Assets, RasterSrc, ShaderSrc},
-    asset_pos::AssetPos,
-    layer::{Layer, Layers, SaveError},
-    layer_pos::LayerPos,
+    asset::{Asset, AssetPos, Assets, RasterSrc, ShaderSrc},
+    layer::{Layer, LayerPos, Layers, SaveError},
 };
 use clap::Parser;
 use raylib::prelude::*;

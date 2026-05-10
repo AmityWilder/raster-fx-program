@@ -31,12 +31,11 @@ use std::{
     thread,
 };
 
-pub mod asset;
-pub mod asset_pos;
+mod asset;
 mod command;
-pub mod layer;
-pub mod layer_pos;
-pub mod rlgl;
+mod error;
+mod layer;
+mod rlgl;
 
 pub fn print_err_recursive(mut e: &dyn std::error::Error) {
     loop {
