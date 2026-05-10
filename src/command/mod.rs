@@ -74,7 +74,7 @@ pub enum Command {
         what: AssetPos,
     },
 
-    /// Create one or more new layers
+    /// Change the order of layers
     #[command(name = "move", visible_alias = "mv")]
     Reorder {
         /// The layer to move
