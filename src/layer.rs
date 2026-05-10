@@ -291,11 +291,10 @@ impl Layer {
                 Raster::Asset { buffer } => {
                     dst.write_all(b"a")?;
                     match assets.raster_pos(buffer).unwrap_or_default() {
-                        AssetPos::Basic => {
-                            dst.write_all(const { &[b'*'; std::mem::size_of::<u64>()] })?
-                        }
+                        AssetPos::Basic => dst.write_all(b"*")?,
                         AssetPos::Index(idx) => {
-                            dst.write_all(&u64::try_from(idx)?.to_le_bytes())?
+                            dst.write_all(b"#")?;
+                            dst.write_all(&u64::try_from(idx)?.to_le_bytes())?;
                         }
                     }
                 }
@@ -383,7 +382,7 @@ impl Layer {
                         AssetPos::Index(pos)
                     }
 
-                    _ => return Err(LoadError::Invalid),
+                    _ => todo!("is_default: {} ({is_default:#X})", is_default as char), // return Err(LoadError::Invalid),
                 };
                 match assets.get(asset_pos)?.link_ref() {
                     AssetRef::Raster(raster) => LayerContent::Raster(Raster::Asset {
@@ -405,7 +404,7 @@ impl Layer {
                 },
             },
 
-            _ => return Err(LoadError::Invalid),
+            _ => todo!("content_type: {} ({content_type:#X})", content_type as char), // return Err(LoadError::Invalid),
         };
 
         let mut effects_len_bytes = [0; _];
@@ -424,7 +423,7 @@ impl Layer {
                     AssetPos::Index(pos)
                 }
 
-                _ => return Err(LoadError::Invalid),
+                _ => todo!("is_default: {} ({is_default:#X})", is_default as char), // return Err(LoadError::Invalid),
             };
             match assets.get(asset_pos)?.link_ref() {
                 AssetRef::Raster(_) => Err(LoadError::AssetMismatch),
@@ -449,7 +448,7 @@ impl Layer {
                     5 => BlendMode::BLEND_ALPHA_PREMULTIPLY,
                     6 => BlendMode::BLEND_CUSTOM,
                     7 => BlendMode::BLEND_CUSTOM_SEPARATE,
-                    _ => return Err(LoadError::Invalid),
+                    _ => todo!("mode: {} ({mode:#X})", mode as char), // return Err(LoadError::Invalid),
                 },
                 tint: Color::new(r, g, b, a),
             }

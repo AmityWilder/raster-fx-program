@@ -168,7 +168,7 @@ impl Asset {
             AssetContent::Raster { src, rtex: _ } => match src {
                 RasterSrc::File(path) => {
                     dst.write_all(b"r")?;
-                    let path = path.canonicalize()?;
+                    let path = path.canonicalize()?; // defend against amyfx file getting moved (we cant deal with the resource moving)
                     let path = path.as_os_str().as_encoded_bytes();
                     dst.write_all(&path.len().to_le_bytes())?;
                     dst.write_all(path)?;
@@ -187,13 +187,13 @@ impl Asset {
                     (false, false) => b's',
                 }])?;
                 if let Some(path) = vs_path {
-                    let path = path.canonicalize()?;
+                    let path = path.canonicalize()?; // defend against amyfx file getting moved (we cant deal with the resource moving)
                     let path = path.as_os_str().as_encoded_bytes();
                     dst.write_all(&path.len().to_le_bytes())?;
                     dst.write_all(path)?;
                 }
                 if let Some(path) = fs_path {
-                    let path = path.canonicalize()?;
+                    let path = path.canonicalize()?; // defend against amyfx file getting moved (we cant deal with the resource moving)
                     let path = path.as_os_str().as_encoded_bytes();
                     dst.write_all(&path.len().to_le_bytes())?;
                     dst.write_all(path)?;
@@ -218,7 +218,7 @@ impl Asset {
         src.read_exact(std::slice::from_mut(&mut tag))?;
         // TODO: make this less gross
         match tag {
-            b'p' => {
+            b'r' => {
                 let mut path_len_bytes = [0; _];
                 src.read_exact(&mut path_len_bytes)?;
                 let path_len = u64::from_le_bytes(path_len_bytes).try_into()?;
@@ -318,7 +318,7 @@ impl Asset {
             )
             .map_err(LoadError::OpenFile),
 
-            _ => Err(LoadError::Invalid),
+            _ => todo!("tag: {tag:#X}"), // Err(LoadError::Invalid),
         }
     }
 }

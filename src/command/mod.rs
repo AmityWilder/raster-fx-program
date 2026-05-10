@@ -1,7 +1,7 @@
 use crate::{
     asset::{Asset, Assets, RasterSrc, ShaderSrc},
     asset_pos::AssetPos,
-    layer::{Layer, Layers},
+    layer::{Layer, Layers, SaveError},
     layer_pos::LayerPos,
 };
 use clap::Parser;
@@ -233,14 +233,15 @@ impl Command {
                 fs_path,
                 vs_path,
             } => {
-                use OpenFileError::*;
                 if let Some(path) = path {
                     assert!(fs_path.is_none() && vs_path.is_none());
                     if let Some(ext) = path.extension()
                         && ext.eq_ignore_ascii_case("amyfx")
                     {
-                        println!("\x1b[1;95mnot yet implemented\x1b[0m");
-                        Err(Invalid)?
+                        let contents = std::fs::read(path).map_err(SaveError::Io)?;
+                        let mut data = contents.as_slice();
+                        *assets = Assets::load(&mut data, rl, thread)?;
+                        *layers = Layers::load(&mut data, rl, thread, assets)?;
                     } else {
                         let asset = assets
                             .push(Asset::load_raster(
@@ -292,7 +293,14 @@ impl Command {
                 println!("\x1b[1;95mnot yet implemented\x1b[0m");
             }
 
-            Self::Quit {} => return Ok(ControlFlow::Break(())),
+            Self::Quit {} => {
+                let mut contents = Vec::new();
+                assets.save(&mut contents)?;
+                layers.save(&mut contents, assets)?;
+                std::fs::write(std::path::Path::new("session.amyfx"), &contents) // TODO: allow user to set this
+                    .map_err(SaveError::Io)?;
+                return Ok(ControlFlow::Break(()));
+            }
         }
         Ok(ControlFlow::Continue(()))
     }

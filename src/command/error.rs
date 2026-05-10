@@ -1,6 +1,7 @@
 use super::ILLEGAL_LAYER_NAME_CHARS;
 use crate::{
     asset_pos::SelectAssetError,
+    layer::{LoadError, SaveError},
     layer_pos::{InsertLayerError, SelectLayerError},
 };
 use std::{collections::TryReserveError, io};
@@ -130,6 +131,12 @@ pub enum RunCommandError {
 
     #[error("failed to remove layers")]
     RemoveLayer(#[from] RemoveLayerError),
+
+    #[error("failed to save")]
+    Save(#[from] SaveError),
+
+    #[error("failed to load")]
+    Load(#[from] LoadError),
 }
 
 #[derive(Debug, Error)]
