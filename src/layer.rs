@@ -1,6 +1,9 @@
 use crate::{
-    asset::{Asset, AssetRef},
-    command::error::{LinkError, NewLayerError, RemoveLayerError, ReorderLayersError},
+    asset::{Asset, AssetRef, Assets},
+    asset_pos::{AssetPos, SelectAssetError},
+    command::error::{
+        LinkError, NewLayerError, OpenFileError, RemoveLayerError, ReorderLayersError,
+    },
     layer_pos::{InsertLayerError, LayerPos, SelectLayerError},
     rlgl::*,
 };
@@ -9,6 +12,7 @@ use std::{
     cell::RefCell,
     collections::BTreeSet,
     rc::{Rc, Weak},
+    string::FromUtf8Error,
 };
 use thiserror::Error;
 
@@ -264,6 +268,242 @@ impl Layer {
         }
     }
 
+    fn save<W: std::io::Write>(&self, dst: &mut W, assets: &Assets) -> Result<(), SaveError> {
+        let Self {
+            name,
+            is_dirty: _, // will be dirty when loaded
+            content,
+            effects,
+            blend,
+            transform,
+        } = self;
+        dst.write_all(&u64::try_from(name.len())?.to_le_bytes())?;
+        dst.write_all(name.as_bytes())?;
+        match &content {
+            LayerContent::Raster(raster) => match raster {
+                Raster::Unique { buffer } => {
+                    dst.write_all(b"u")?;
+                    let img = buffer.load_image()?;
+                    let data = img.export_image_to_memory(".png")?;
+                    dst.write_all(&u64::try_from(data.len())?.to_le_bytes())?;
+                    dst.write_all(data)?;
+                }
+                Raster::Asset { buffer } => {
+                    dst.write_all(b"a")?;
+                    match assets.raster_pos(buffer).unwrap_or_default() {
+                        AssetPos::Basic => {
+                            dst.write_all(const { &[b'*'; std::mem::size_of::<u64>()] })?
+                        }
+                        AssetPos::Index(idx) => {
+                            dst.write_all(&u64::try_from(idx)?.to_le_bytes())?
+                        }
+                    }
+                }
+            },
+            LayerContent::Group {
+                buffer: _, // TODO: maybe store the size?
+                children,
+            } => {
+                dst.write_all(b"g")?;
+                dst.write_all(&u64::try_from(children.len())?.to_le_bytes())?;
+                if let LayerContent::Group { children, .. } = &content {
+                    for child in children {
+                        child.save(dst, assets)?;
+                    }
+                }
+            }
+        }
+        dst.write_all(&u64::try_from(effects.len())?.to_le_bytes())?;
+        for Effect { asset } in effects {
+            match asset
+                .upgrade()
+                .and_then(|shader| assets.shader_pos(&shader))
+                .unwrap_or_default()
+            {
+                AssetPos::Basic => dst.write_all(b"*")?,
+                AssetPos::Index(idx) => {
+                    dst.write_all(b"#")?;
+                    dst.write_all(&u64::try_from(idx)?.to_le_bytes())?;
+                }
+            }
+        }
+        {
+            let Blending {
+                mode,
+                tint: Color { r, g, b, a },
+            } = *blend;
+            dst.write_all(&[mode as u8, r, g, b, a])?;
+        }
+        for cell in transform.to_array() {
+            dst.write_all(&cell.to_bits().to_le_bytes())?;
+        }
+        Ok(())
+    }
+
+    fn load<R: std::io::Read>(
+        src: &mut R,
+        rl: &mut RaylibHandle,
+        thread: &RaylibThread,
+        assets: &Assets,
+    ) -> Result<Self, LoadError> {
+        let mut name_len_bytes = [0; _];
+        src.read_exact(&mut name_len_bytes)?;
+        let name_len = u64::from_le_bytes(name_len_bytes).try_into()?;
+        let mut name_bytes = vec![0; name_len];
+        src.read_exact(&mut name_bytes)?;
+        let name = String::from_utf8(name_bytes)?;
+        let mut content_type = 0;
+        src.read_exact(std::slice::from_mut(&mut content_type))?;
+        let content = match content_type {
+            b'u' => {
+                let mut data_len_bytes = [0; _];
+                src.read_exact(&mut data_len_bytes)?;
+                let data_len = u64::from_le_bytes(data_len_bytes).try_into()?;
+                let mut data = vec![0; data_len];
+                src.read_exact(&mut data)?;
+                LayerContent::Raster(Raster::Unique {
+                    buffer: rtex_from_image(
+                        rl,
+                        thread,
+                        &Image::load_image_from_mem(".png", &data)?,
+                    )?,
+                })
+            }
+
+            b'a' => {
+                let mut is_default = 0;
+                src.read_exact(std::slice::from_mut(&mut is_default))?;
+                let asset_pos = match is_default {
+                    b'*' => AssetPos::Basic,
+
+                    b'#' => {
+                        let mut pos_bytes = [0; _];
+                        src.read_exact(&mut pos_bytes)?;
+                        let pos = u64::from_le_bytes(pos_bytes).try_into()?;
+                        AssetPos::Index(pos)
+                    }
+
+                    _ => return Err(LoadError::Invalid),
+                };
+                match assets.get(asset_pos)?.link_ref() {
+                    AssetRef::Raster(raster) => LayerContent::Raster(Raster::Asset {
+                        buffer: raster.clone(),
+                    }),
+                    AssetRef::Shader(_) => return Err(LoadError::AssetMismatch),
+                }
+            }
+
+            b'g' => LayerContent::Group {
+                buffer: rl.load_render_texture(thread, 0, 0)?,
+                children: {
+                    let mut children_len_bytes = [0; _];
+                    src.read_exact(&mut children_len_bytes)?;
+                    let children_len = u64::from_le_bytes(children_len_bytes).try_into()?;
+                    std::iter::repeat_with(|| Layer::load(src, rl, thread, assets))
+                        .take(children_len)
+                        .collect::<Result<_, _>>()?
+                },
+            },
+
+            _ => return Err(LoadError::Invalid),
+        };
+
+        let mut effects_len_bytes = [0; _];
+        src.read_exact(&mut effects_len_bytes)?;
+        let effects_len = u64::from_le_bytes(effects_len_bytes).try_into()?;
+        let effects = std::iter::repeat_with(|| {
+            let mut is_default = 0;
+            src.read_exact(std::slice::from_mut(&mut is_default))?;
+            let asset_pos = match is_default {
+                b'*' => AssetPos::Basic,
+
+                b'#' => {
+                    let mut pos_bytes = [0; _];
+                    src.read_exact(&mut pos_bytes)?;
+                    let pos = u64::from_le_bytes(pos_bytes).try_into()?;
+                    AssetPos::Index(pos)
+                }
+
+                _ => return Err(LoadError::Invalid),
+            };
+            match assets.get(asset_pos)?.link_ref() {
+                AssetRef::Raster(_) => Err(LoadError::AssetMismatch),
+                AssetRef::Shader(shader) => Ok(Effect {
+                    asset: Rc::downgrade(shader),
+                }),
+            }
+        })
+        .take(effects_len)
+        .collect::<Result<_, _>>()?;
+        let blend = {
+            let mut blend_bytes = [0; _];
+            src.read_exact(&mut blend_bytes)?;
+            let [mode, r, g, b, a] = blend_bytes;
+            Blending {
+                mode: match mode {
+                    0 => BlendMode::BLEND_ALPHA,
+                    1 => BlendMode::BLEND_ADDITIVE,
+                    2 => BlendMode::BLEND_MULTIPLIED,
+                    3 => BlendMode::BLEND_ADD_COLORS,
+                    4 => BlendMode::BLEND_SUBTRACT_COLORS,
+                    5 => BlendMode::BLEND_ALPHA_PREMULTIPLY,
+                    6 => BlendMode::BLEND_CUSTOM,
+                    7 => BlendMode::BLEND_CUSTOM_SEPARATE,
+                    _ => return Err(LoadError::Invalid),
+                },
+                tint: Color::new(r, g, b, a),
+            }
+        };
+        let mut matrix_bytes = [[0; _]; _];
+        src.read_exact(matrix_bytes.as_flattened_mut())?;
+        let [
+            m0_bytes,
+            m1_bytes,
+            m2_bytes,
+            m3_bytes,
+            m4_bytes,
+            m5_bytes,
+            m6_bytes,
+            m7_bytes,
+            m8_bytes,
+            m9_bytes,
+            m10_bytes,
+            m11_bytes,
+            m12_bytes,
+            m13_bytes,
+            m14_bytes,
+            m15_bytes,
+        ] = matrix_bytes;
+
+        let transform = Matrix {
+            m0: f32::from_bits(u32::from_le_bytes(m0_bytes)),
+            m4: f32::from_bits(u32::from_le_bytes(m4_bytes)),
+            m8: f32::from_bits(u32::from_le_bytes(m8_bytes)),
+            m12: f32::from_bits(u32::from_le_bytes(m12_bytes)),
+            m1: f32::from_bits(u32::from_le_bytes(m1_bytes)),
+            m5: f32::from_bits(u32::from_le_bytes(m5_bytes)),
+            m9: f32::from_bits(u32::from_le_bytes(m9_bytes)),
+            m13: f32::from_bits(u32::from_le_bytes(m13_bytes)),
+            m2: f32::from_bits(u32::from_le_bytes(m2_bytes)),
+            m6: f32::from_bits(u32::from_le_bytes(m6_bytes)),
+            m10: f32::from_bits(u32::from_le_bytes(m10_bytes)),
+            m14: f32::from_bits(u32::from_le_bytes(m14_bytes)),
+            m3: f32::from_bits(u32::from_le_bytes(m3_bytes)),
+            m7: f32::from_bits(u32::from_le_bytes(m7_bytes)),
+            m11: f32::from_bits(u32::from_le_bytes(m11_bytes)),
+            m15: f32::from_bits(u32::from_le_bytes(m15_bytes)),
+        };
+
+        Ok(Self {
+            name,
+            is_dirty: true,
+            content,
+            effects,
+            blend,
+            transform,
+        })
+    }
+
     pub const fn new_raster_asset(name: String, buffer: Rc<RefCell<RenderTexture2D>>) -> Self {
         Self::new(name, LayerContent::Raster(Raster::Asset { buffer }))
     }
@@ -368,15 +608,49 @@ pub struct Layers {
 }
 
 #[derive(Debug, Error)]
-pub enum SaveLayersError {
+pub enum SaveError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
+
+    #[error(transparent)]
+    Raylib(#[from] raylib::error::Error),
+
+    #[error(
+        "cannot save this file; files are stored with 64-bit integers for standardization and your system has {} bits, which exceeds that. \
+        this would be fine on its own, but you also managed to exceed {} instances of something, which is kind of absurd...",
+        const { usize::BITS },
+        const { u64::MAX }
+    )]
+    Oversize(#[from] std::num::TryFromIntError),
 }
 
 #[derive(Debug, Error)]
-pub enum LoadLayersError {
+pub enum LoadError {
+    #[error(transparent)]
+    OpenFile(#[from] OpenFileError),
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
+
+    #[error(transparent)]
+    Raylib(#[from] raylib::error::Error),
+
+    #[error(transparent)]
+    FromUtf8(#[from] FromUtf8Error),
+
+    #[error(
+        "save file appears to have been created on a system with a larger bit width and exceeded this system's memory limit without exceeding the limit on that system"
+    )]
+    Oversize(#[from] std::num::TryFromIntError),
+
+    #[error("file is an incompatible format or corrupt")]
+    Invalid,
+
+    #[error("missing asset")]
+    SelectAsset(#[from] SelectAssetError),
+
+    #[error("asset is of wrong type")]
+    AssetMismatch,
 }
 
 impl Layers {
@@ -385,6 +659,34 @@ impl Layers {
             list: Vec::new(),
             curr: 0,
         }
+    }
+
+    pub fn save<W: std::io::Write>(&self, dst: &mut W, assets: &Assets) -> Result<(), SaveError> {
+        let Self { list, curr } = self;
+        dst.write_all(&u64::try_from(list.len())?.to_le_bytes())?;
+        for layer in list {
+            layer.save(dst, assets)?;
+        }
+        dst.write_all(&u64::try_from(*curr)?.to_le_bytes())?;
+        Ok(())
+    }
+
+    pub fn load<R: std::io::Read>(
+        src: &mut R,
+        rl: &mut RaylibHandle,
+        thread: &RaylibThread,
+        assets: &Assets,
+    ) -> Result<Self, LoadError> {
+        let mut list_len_bytes = [0; _];
+        src.read_exact(&mut list_len_bytes)?;
+        let list_len = u64::from_le_bytes(list_len_bytes).try_into()?;
+        let list = std::iter::repeat_with(|| Layer::load(src, rl, thread, assets))
+            .take(list_len)
+            .collect::<Result<_, _>>()?;
+        let mut curr_bytes = [0; _];
+        src.read_exact(&mut curr_bytes)?;
+        let curr = u64::from_le_bytes(curr_bytes).try_into()?;
+        Ok(Self { list, curr })
     }
 
     pub const fn len(&self) -> usize {
