@@ -5,6 +5,8 @@ use crate::{
     },
     error::IndexError,
     rlgl::*,
+    serde::{Deserialize, DeserializeSlice, Serialize, SerializeSlice},
+    serde_pod,
 };
 use raylib::prelude::*;
 use std::{
@@ -346,6 +348,41 @@ pub struct Effect {
     pub asset: Weak<RefCell<Shader>>,
 }
 
+impl Serialize<&Assets> for Effect {
+    fn serialize<W>(&self, dst: &mut W, assets: &Assets) -> std::io::Result<()>
+    where
+        W: ?Sized + std::io::Write,
+    {
+        self.asset
+            .upgrade()
+            .and_then(|shader| assets.shader_pos(&shader))
+            .unwrap_or_default()
+            .serialize(dst, ())
+    }
+}
+
+impl Deserialize<&Assets> for Effect {
+    fn deserialize<R>(src: &mut R, assets: &Assets) -> std::io::Result<Self>
+    where
+        Self: Sized,
+        R: ?Sized + std::io::Read,
+    {
+        let asset_pos = AssetPos::deserialize(src, ())?;
+        match assets
+            .get(asset_pos)
+            .map_err(std::io::Error::other)?
+            .link_ref()
+        {
+            AssetRef::Shader(shader) => Ok(Effect {
+                asset: Rc::downgrade(shader),
+            }),
+            AssetRef::Raster(_) => Err(std::io::Error::other(
+                "asset mismatch: expecing shader, found raster",
+            )),
+        }
+    }
+}
+
 fn draw_texture_quad(
     d: &mut impl RaylibDraw,
     texture: &impl RaylibTexture2D,
@@ -458,18 +495,13 @@ impl EffectSlice for [Effect] {
 }
 
 #[derive(Debug)]
-pub enum Raster {
+enum LayerContent {
     Unique {
         buffer: RenderTexture2D,
     },
     Asset {
         buffer: Rc<RefCell<RenderTexture2D>>,
     },
-}
-
-#[derive(Debug)]
-enum LayerContent {
-    Raster(Raster),
     Group {
         buffer: RenderTexture2D,
 
@@ -478,11 +510,80 @@ enum LayerContent {
     },
 }
 
+impl Serialize<&Assets> for LayerContent {
+    fn serialize<W>(&self, dst: &mut W, assets: &Assets) -> std::io::Result<()>
+    where
+        W: ?Sized + std::io::Write,
+    {
+        match self {
+            Self::Unique { buffer } => b'u'
+                .serialize(dst, ())
+                .and_then(|()| buffer.serialize(dst, ())),
+
+            Self::Asset { buffer } => b'a'.serialize(dst, ()).and_then(|()| {
+                assets
+                    .raster_pos(buffer)
+                    .unwrap_or_default()
+                    .serialize(dst, ())
+            }),
+
+            Self::Group {
+                buffer: _, // TODO: maybe save the width/height?
+                children,
+            } => b'g'
+                .serialize(dst, ())
+                .and_then(|()| children.serialize_slice(dst, || assets)),
+        }
+    }
+}
+
+impl Deserialize<(&mut RaylibHandle, &RaylibThread, &Assets)> for LayerContent {
+    fn deserialize<R>(
+        src: &mut R,
+        (rl, thread, assets): (&mut RaylibHandle, &RaylibThread, &Assets),
+    ) -> std::io::Result<Self>
+    where
+        Self: Sized,
+        R: ?Sized + std::io::Read,
+    {
+        match u8::deserialize(src, ())? {
+            b'u' => RenderTexture2D::deserialize(src, (rl, thread))
+                .map(|buffer| Self::Unique { buffer }),
+
+            b'a' => match assets
+                .get(AssetPos::deserialize(src, ())?)
+                .map_err(std::io::Error::other)?
+                .link_ref()
+            {
+                AssetRef::Raster(raster) => Ok(Self::Asset {
+                    buffer: raster.clone(),
+                }),
+                AssetRef::Shader(_) => Err(std::io::Error::other(
+                    "asset mismatch: expecing raster, found shader",
+                )),
+            },
+
+            b'g' => Ok(Self::Group {
+                buffer: rl
+                    .load_render_texture(thread, 0, 0)
+                    .map_err(std::io::Error::other)?,
+                children: Vec::deserialize_slice(src, |_| (rl, thread, assets))?,
+            }),
+
+            x => Err(std::io::Error::other(format!(
+                "unknown variant: {x} ({x:#X})"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Blending {
     pub mode: BlendMode,
     pub tint: Color,
 }
+
+serde_pod!(Blending { mode, tint });
 
 impl Blending {
     pub const fn new() -> Self {
@@ -509,6 +610,48 @@ pub struct Layer {
     pub effects: Vec<Effect>,
     pub blend: Blending,
     pub transform: Matrix,
+}
+
+impl Serialize<&Assets> for Layer {
+    fn serialize<W>(&self, dst: &mut W, assets: &Assets) -> std::io::Result<()>
+    where
+        W: ?Sized + std::io::Write,
+    {
+        let Self {
+            name,
+            is_dirty: _, // will be dirty when loaded
+            content,
+            effects,
+            blend,
+            transform,
+        } = self;
+        name.serialize(dst, ())?;
+        content.serialize(dst, assets)?;
+        effects.serialize_slice(dst, || assets);
+        blend.serialize(dst, ());
+        transform.serialize(dst, ());
+        Ok(())
+    }
+}
+
+impl Deserialize<(&mut RaylibHandle, &RaylibThread, &Assets)> for Layer {
+    fn deserialize<R>(
+        src: &mut R,
+        (rl, thread, assets): (&mut RaylibHandle, &RaylibThread, &Assets),
+    ) -> std::io::Result<Self>
+    where
+        Self: Sized,
+        R: ?Sized + std::io::Read,
+    {
+        Ok(Self {
+            name: String::deserialize(src, ())?,
+            is_dirty: true,
+            content: LayerContent::deserialize(src, (rl, thread, assets))?,
+            effects: Vec::deserialize_slice(src, |_| assets)?,
+            blend: Blending::deserialize(src, ())?,
+            transform: Matrix::deserialize(src, ())?,
+        })
+    }
 }
 
 impl Layer {
@@ -540,247 +683,245 @@ impl Layer {
         }
     }
 
-    fn save<W: std::io::Write>(&self, dst: &mut W, assets: &Assets) -> Result<(), SaveError> {
-        let Self {
-            name,
-            is_dirty: _, // will be dirty when loaded
-            content,
-            effects,
-            blend,
-            transform,
-        } = self;
-        dst.write_all(&u64::try_from(name.len())?.to_le_bytes())?;
-        dst.write_all(name.as_bytes())?;
-        match &content {
-            LayerContent::Raster(raster) => match raster {
-                Raster::Unique { buffer } => {
-                    dst.write_all(b"u")?;
-                    let img = buffer.load_image()?;
-                    let data = img.export_image_to_memory(".png")?;
-                    dst.write_all(&u64::try_from(data.len())?.to_le_bytes())?;
-                    dst.write_all(data)?;
-                }
-                Raster::Asset { buffer } => {
-                    dst.write_all(b"a")?;
-                    match assets.raster_pos(buffer).unwrap_or_default() {
-                        AssetPos::Basic => dst.write_all(b"*")?,
-                        AssetPos::Index(idx) => {
-                            dst.write_all(b"#")?;
-                            dst.write_all(&u64::try_from(idx)?.to_le_bytes())?;
-                        }
-                    }
-                }
-            },
-            LayerContent::Group {
-                buffer: _, // TODO: maybe store the size?
-                children,
-            } => {
-                dst.write_all(b"g")?;
-                dst.write_all(&u64::try_from(children.len())?.to_le_bytes())?;
-                if let LayerContent::Group { children, .. } = &content {
-                    for child in children {
-                        child.save(dst, assets)?;
-                    }
-                }
-            }
-        }
-        dst.write_all(&u64::try_from(effects.len())?.to_le_bytes())?;
-        for Effect { asset } in effects {
-            match asset
-                .upgrade()
-                .and_then(|shader| assets.shader_pos(&shader))
-                .unwrap_or_default()
-            {
-                AssetPos::Basic => dst.write_all(b"*")?,
-                AssetPos::Index(idx) => {
-                    dst.write_all(b"#")?;
-                    dst.write_all(&u64::try_from(idx)?.to_le_bytes())?;
-                }
-            }
-        }
-        {
-            let Blending {
-                mode,
-                tint: Color { r, g, b, a },
-            } = *blend;
-            dst.write_all(&[mode as u8, r, g, b, a])?;
-        }
-        for cell in transform.to_array() {
-            dst.write_all(&cell.to_bits().to_le_bytes())?;
-        }
-        Ok(())
-    }
+    // fn save<W: std::io::Write>(&self, dst: &mut W, assets: &Assets) -> Result<(), SaveError> {
+    //     let Self {
+    //         name,
+    //         is_dirty: _, // will be dirty when loaded
+    //         content,
+    //         effects,
+    //         blend,
+    //         transform,
+    //     } = self;
+    //     dst.write_all(&u64::try_from(name.len())?.to_le_bytes())?;
+    //     dst.write_all(name.as_bytes())?;
+    //     match &content {
+    //         LayerContent::Unique { buffer } => {
+    //             dst.write_all(b"u")?;
+    //             let img = buffer.load_image()?;
+    //             let data = img.export_image_to_memory(".png")?;
+    //             dst.write_all(&u64::try_from(data.len())?.to_le_bytes())?;
+    //             dst.write_all(data)?;
+    //         }
+    //         LayerContent::Asset { buffer } => {
+    //             dst.write_all(b"a")?;
+    //             match assets.raster_pos(buffer).unwrap_or_default() {
+    //                 AssetPos::Basic => dst.write_all(b"*")?,
+    //                 AssetPos::Index(idx) => {
+    //                     dst.write_all(b"#")?;
+    //                     dst.write_all(&u64::try_from(idx)?.to_le_bytes())?;
+    //                 }
+    //             }
+    //         }
+    //         LayerContent::Group {
+    //             buffer: _, // TODO: maybe store the size?
+    //             children,
+    //         } => {
+    //             dst.write_all(b"g")?;
+    //             dst.write_all(&u64::try_from(children.len())?.to_le_bytes())?;
+    //             if let LayerContent::Group { children, .. } = &content {
+    //                 for child in children {
+    //                     child.save(dst, assets)?;
+    //                 }
+    //             }
+    //         }
+    //     }
+    //     dst.write_all(&u64::try_from(effects.len())?.to_le_bytes())?;
+    //     for Effect { asset } in effects {
+    //         match asset
+    //             .upgrade()
+    //             .and_then(|shader| assets.shader_pos(&shader))
+    //             .unwrap_or_default()
+    //         {
+    //             AssetPos::Basic => dst.write_all(b"*")?,
+    //             AssetPos::Index(idx) => {
+    //                 dst.write_all(b"#")?;
+    //                 dst.write_all(&u64::try_from(idx)?.to_le_bytes())?;
+    //             }
+    //         }
+    //     }
+    //     {
+    //         let Blending {
+    //             mode,
+    //             tint: Color { r, g, b, a },
+    //         } = *blend;
+    //         dst.write_all(&[mode as u8, r, g, b, a])?;
+    //     }
+    //     for cell in transform.to_array() {
+    //         dst.write_all(&cell.to_bits().to_le_bytes())?;
+    //     }
+    //     Ok(())
+    // }
 
-    fn load<R: std::io::Read>(
-        src: &mut R,
-        rl: &mut RaylibHandle,
-        thread: &RaylibThread,
-        assets: &Assets,
-    ) -> Result<Self, LoadError> {
-        let mut name_len_bytes = [0; _];
-        src.read_exact(&mut name_len_bytes)?;
-        let name_len = u64::from_le_bytes(name_len_bytes).try_into()?;
-        let mut name_bytes = vec![0; name_len];
-        src.read_exact(&mut name_bytes)?;
-        let name = String::from_utf8(name_bytes)?;
-        let mut content_type = 0;
-        src.read_exact(std::slice::from_mut(&mut content_type))?;
-        let content = match content_type {
-            b'u' => {
-                let mut data_len_bytes = [0; _];
-                src.read_exact(&mut data_len_bytes)?;
-                let data_len = u64::from_le_bytes(data_len_bytes).try_into()?;
-                let mut data = vec![0; data_len];
-                src.read_exact(&mut data)?;
-                LayerContent::Raster(Raster::Unique {
-                    buffer: rtex_from_image(
-                        rl,
-                        thread,
-                        &Image::load_image_from_mem(".png", &data)?,
-                    )?,
-                })
-            }
+    // fn load<R: std::io::Read>(
+    //     src: &mut R,
+    //     rl: &mut RaylibHandle,
+    //     thread: &RaylibThread,
+    //     assets: &Assets,
+    // ) -> Result<Self, LoadError> {
+    //     let mut name_len_bytes = [0; _];
+    //     src.read_exact(&mut name_len_bytes)?;
+    //     let name_len = u64::from_le_bytes(name_len_bytes).try_into()?;
+    //     let mut name_bytes = vec![0; name_len];
+    //     src.read_exact(&mut name_bytes)?;
+    //     let name = String::from_utf8(name_bytes)?;
+    //     let mut content_type = 0;
+    //     src.read_exact(std::slice::from_mut(&mut content_type))?;
+    //     let content = match content_type {
+    //         b'u' => {
+    //             let mut data_len_bytes = [0; _];
+    //             src.read_exact(&mut data_len_bytes)?;
+    //             let data_len = u64::from_le_bytes(data_len_bytes).try_into()?;
+    //             let mut data = vec![0; data_len];
+    //             src.read_exact(&mut data)?;
+    //             LayerContent::Unique {
+    //                 buffer: rtex_from_image(
+    //                     rl,
+    //                     thread,
+    //                     &Image::load_image_from_mem(".png", &data)?,
+    //                 )?,
+    //             }
+    //         }
 
-            b'a' => {
-                let mut is_default = 0;
-                src.read_exact(std::slice::from_mut(&mut is_default))?;
-                let asset_pos = match is_default {
-                    b'*' => AssetPos::Basic,
+    //         b'a' => {
+    //             let mut is_default = 0;
+    //             src.read_exact(std::slice::from_mut(&mut is_default))?;
+    //             let asset_pos = match is_default {
+    //                 b'*' => AssetPos::Basic,
 
-                    b'#' => {
-                        let mut pos_bytes = [0; _];
-                        src.read_exact(&mut pos_bytes)?;
-                        let pos = u64::from_le_bytes(pos_bytes).try_into()?;
-                        AssetPos::Index(pos)
-                    }
+    //                 b'#' => {
+    //                     let mut pos_bytes = [0; _];
+    //                     src.read_exact(&mut pos_bytes)?;
+    //                     let pos = u64::from_le_bytes(pos_bytes).try_into()?;
+    //                     AssetPos::Index(pos)
+    //                 }
 
-                    _ => todo!("is_default: {} ({is_default:#X})", is_default as char), // return Err(LoadError::Invalid),
-                };
-                match assets.get(asset_pos)?.link_ref() {
-                    AssetRef::Raster(raster) => LayerContent::Raster(Raster::Asset {
-                        buffer: raster.clone(),
-                    }),
-                    AssetRef::Shader(_) => return Err(LoadError::AssetMismatch),
-                }
-            }
+    //                 _ => todo!("is_default: {} ({is_default:#X})", is_default as char), // return Err(LoadError::Invalid),
+    //             };
+    //             match assets.get(asset_pos)?.link_ref() {
+    //                 AssetRef::Raster(raster) => LayerContent::Asset {
+    //                     buffer: raster.clone(),
+    //                 },
+    //                 AssetRef::Shader(_) => return Err(LoadError::AssetMismatch),
+    //             }
+    //         }
 
-            b'g' => LayerContent::Group {
-                buffer: rl.load_render_texture(thread, 0, 0)?,
-                children: {
-                    let mut children_len_bytes = [0; _];
-                    src.read_exact(&mut children_len_bytes)?;
-                    let children_len = u64::from_le_bytes(children_len_bytes).try_into()?;
-                    std::iter::repeat_with(|| Layer::load(src, rl, thread, assets))
-                        .take(children_len)
-                        .collect::<Result<_, _>>()?
-                },
-            },
+    //         b'g' => LayerContent::Group {
+    //             buffer: rl.load_render_texture(thread, 0, 0)?,
+    //             children: {
+    //                 let mut children_len_bytes = [0; _];
+    //                 src.read_exact(&mut children_len_bytes)?;
+    //                 let children_len = u64::from_le_bytes(children_len_bytes).try_into()?;
+    //                 std::iter::repeat_with(|| Layer::load(src, rl, thread, assets))
+    //                     .take(children_len)
+    //                     .collect::<Result<_, _>>()?
+    //             },
+    //         },
 
-            _ => todo!("content_type: {} ({content_type:#X})", content_type as char), // return Err(LoadError::Invalid),
-        };
+    //         _ => todo!("content_type: {} ({content_type:#X})", content_type as char), // return Err(LoadError::Invalid),
+    //     };
 
-        let mut effects_len_bytes = [0; _];
-        src.read_exact(&mut effects_len_bytes)?;
-        let effects_len = u64::from_le_bytes(effects_len_bytes).try_into()?;
-        let effects = std::iter::repeat_with(|| {
-            let mut is_default = 0;
-            src.read_exact(std::slice::from_mut(&mut is_default))?;
-            let asset_pos = match is_default {
-                b'*' => AssetPos::Basic,
+    //     let mut effects_len_bytes = [0; _];
+    //     src.read_exact(&mut effects_len_bytes)?;
+    //     let effects_len = u64::from_le_bytes(effects_len_bytes).try_into()?;
+    //     let effects = std::iter::repeat_with(|| {
+    //         let mut is_default = 0;
+    //         src.read_exact(std::slice::from_mut(&mut is_default))?;
+    //         let asset_pos = match is_default {
+    //             b'*' => AssetPos::Basic,
 
-                b'#' => {
-                    let mut pos_bytes = [0; _];
-                    src.read_exact(&mut pos_bytes)?;
-                    let pos = u64::from_le_bytes(pos_bytes).try_into()?;
-                    AssetPos::Index(pos)
-                }
+    //             b'#' => {
+    //                 let mut pos_bytes = [0; _];
+    //                 src.read_exact(&mut pos_bytes)?;
+    //                 let pos = u64::from_le_bytes(pos_bytes).try_into()?;
+    //                 AssetPos::Index(pos)
+    //             }
 
-                _ => todo!("is_default: {} ({is_default:#X})", is_default as char), // return Err(LoadError::Invalid),
-            };
-            match assets.get(asset_pos)?.link_ref() {
-                AssetRef::Raster(_) => Err(LoadError::AssetMismatch),
-                AssetRef::Shader(shader) => Ok(Effect {
-                    asset: Rc::downgrade(shader),
-                }),
-            }
-        })
-        .take(effects_len)
-        .collect::<Result<_, _>>()?;
-        let blend = {
-            let mut blend_bytes = [0; _];
-            src.read_exact(&mut blend_bytes)?;
-            let [mode, r, g, b, a] = blend_bytes;
-            Blending {
-                mode: match mode {
-                    0 => BlendMode::BLEND_ALPHA,
-                    1 => BlendMode::BLEND_ADDITIVE,
-                    2 => BlendMode::BLEND_MULTIPLIED,
-                    3 => BlendMode::BLEND_ADD_COLORS,
-                    4 => BlendMode::BLEND_SUBTRACT_COLORS,
-                    5 => BlendMode::BLEND_ALPHA_PREMULTIPLY,
-                    6 => BlendMode::BLEND_CUSTOM,
-                    7 => BlendMode::BLEND_CUSTOM_SEPARATE,
-                    _ => todo!("mode: {} ({mode:#X})", mode as char), // return Err(LoadError::Invalid),
-                },
-                tint: Color::new(r, g, b, a),
-            }
-        };
-        let mut matrix_bytes = [[0; _]; _];
-        src.read_exact(matrix_bytes.as_flattened_mut())?;
-        let [
-            m0_bytes,
-            m1_bytes,
-            m2_bytes,
-            m3_bytes,
-            m4_bytes,
-            m5_bytes,
-            m6_bytes,
-            m7_bytes,
-            m8_bytes,
-            m9_bytes,
-            m10_bytes,
-            m11_bytes,
-            m12_bytes,
-            m13_bytes,
-            m14_bytes,
-            m15_bytes,
-        ] = matrix_bytes;
+    //             _ => todo!("is_default: {} ({is_default:#X})", is_default as char), // return Err(LoadError::Invalid),
+    //         };
+    //         match assets.get(asset_pos)?.link_ref() {
+    //             AssetRef::Raster(_) => Err(LoadError::AssetMismatch),
+    //             AssetRef::Shader(shader) => Ok(Effect {
+    //                 asset: Rc::downgrade(shader),
+    //             }),
+    //         }
+    //     })
+    //     .take(effects_len)
+    //     .collect::<Result<_, _>>()?;
+    //     let blend = {
+    //         let mut blend_bytes = [0; _];
+    //         src.read_exact(&mut blend_bytes)?;
+    //         let [mode, r, g, b, a] = blend_bytes;
+    //         Blending {
+    //             mode: match mode {
+    //                 0 => BlendMode::BLEND_ALPHA,
+    //                 1 => BlendMode::BLEND_ADDITIVE,
+    //                 2 => BlendMode::BLEND_MULTIPLIED,
+    //                 3 => BlendMode::BLEND_ADD_COLORS,
+    //                 4 => BlendMode::BLEND_SUBTRACT_COLORS,
+    //                 5 => BlendMode::BLEND_ALPHA_PREMULTIPLY,
+    //                 6 => BlendMode::BLEND_CUSTOM,
+    //                 7 => BlendMode::BLEND_CUSTOM_SEPARATE,
+    //                 _ => todo!("mode: {} ({mode:#X})", mode as char), // return Err(LoadError::Invalid),
+    //             },
+    //             tint: Color::new(r, g, b, a),
+    //         }
+    //     };
+    //     let mut matrix_bytes = [[0; _]; _];
+    //     src.read_exact(matrix_bytes.as_flattened_mut())?;
+    //     let [
+    //         m0_bytes,
+    //         m1_bytes,
+    //         m2_bytes,
+    //         m3_bytes,
+    //         m4_bytes,
+    //         m5_bytes,
+    //         m6_bytes,
+    //         m7_bytes,
+    //         m8_bytes,
+    //         m9_bytes,
+    //         m10_bytes,
+    //         m11_bytes,
+    //         m12_bytes,
+    //         m13_bytes,
+    //         m14_bytes,
+    //         m15_bytes,
+    //     ] = matrix_bytes;
 
-        let transform = Matrix {
-            m0: f32::from_bits(u32::from_le_bytes(m0_bytes)),
-            m4: f32::from_bits(u32::from_le_bytes(m4_bytes)),
-            m8: f32::from_bits(u32::from_le_bytes(m8_bytes)),
-            m12: f32::from_bits(u32::from_le_bytes(m12_bytes)),
-            m1: f32::from_bits(u32::from_le_bytes(m1_bytes)),
-            m5: f32::from_bits(u32::from_le_bytes(m5_bytes)),
-            m9: f32::from_bits(u32::from_le_bytes(m9_bytes)),
-            m13: f32::from_bits(u32::from_le_bytes(m13_bytes)),
-            m2: f32::from_bits(u32::from_le_bytes(m2_bytes)),
-            m6: f32::from_bits(u32::from_le_bytes(m6_bytes)),
-            m10: f32::from_bits(u32::from_le_bytes(m10_bytes)),
-            m14: f32::from_bits(u32::from_le_bytes(m14_bytes)),
-            m3: f32::from_bits(u32::from_le_bytes(m3_bytes)),
-            m7: f32::from_bits(u32::from_le_bytes(m7_bytes)),
-            m11: f32::from_bits(u32::from_le_bytes(m11_bytes)),
-            m15: f32::from_bits(u32::from_le_bytes(m15_bytes)),
-        };
+    //     let transform = Matrix {
+    //         m0: f32::from_bits(u32::from_le_bytes(m0_bytes)),
+    //         m4: f32::from_bits(u32::from_le_bytes(m4_bytes)),
+    //         m8: f32::from_bits(u32::from_le_bytes(m8_bytes)),
+    //         m12: f32::from_bits(u32::from_le_bytes(m12_bytes)),
+    //         m1: f32::from_bits(u32::from_le_bytes(m1_bytes)),
+    //         m5: f32::from_bits(u32::from_le_bytes(m5_bytes)),
+    //         m9: f32::from_bits(u32::from_le_bytes(m9_bytes)),
+    //         m13: f32::from_bits(u32::from_le_bytes(m13_bytes)),
+    //         m2: f32::from_bits(u32::from_le_bytes(m2_bytes)),
+    //         m6: f32::from_bits(u32::from_le_bytes(m6_bytes)),
+    //         m10: f32::from_bits(u32::from_le_bytes(m10_bytes)),
+    //         m14: f32::from_bits(u32::from_le_bytes(m14_bytes)),
+    //         m3: f32::from_bits(u32::from_le_bytes(m3_bytes)),
+    //         m7: f32::from_bits(u32::from_le_bytes(m7_bytes)),
+    //         m11: f32::from_bits(u32::from_le_bytes(m11_bytes)),
+    //         m15: f32::from_bits(u32::from_le_bytes(m15_bytes)),
+    //     };
 
-        Ok(Self {
-            name,
-            is_dirty: true,
-            content,
-            effects,
-            blend,
-            transform,
-        })
-    }
+    //     Ok(Self {
+    //         name,
+    //         is_dirty: true,
+    //         content,
+    //         effects,
+    //         blend,
+    //         transform,
+    //     })
+    // }
 
     pub const fn new_raster_asset(name: String, buffer: Rc<RefCell<RenderTexture2D>>) -> Self {
-        Self::new(name, LayerContent::Raster(Raster::Asset { buffer }))
+        Self::new(name, LayerContent::Asset { buffer })
     }
 
     pub const fn new_raster(name: String, buffer: RenderTexture2D) -> Self {
-        Self::new(name, LayerContent::Raster(Raster::Unique { buffer }))
+        Self::new(name, LayerContent::Unique { buffer })
     }
 
     pub const fn new_group(name: String, buffer: RenderTexture2D) -> Self {
@@ -835,9 +976,8 @@ impl Layer {
         self.effects.apply(
             &mut d.begin_blend_mode(self.blend.mode),
             match &self.content {
-                LayerContent::Raster(Raster::Unique { buffer })
-                | LayerContent::Group { buffer, .. } => buffer,
-                LayerContent::Raster(Raster::Asset { buffer, .. }) => {
+                LayerContent::Unique { buffer } | LayerContent::Group { buffer, .. } => buffer,
+                LayerContent::Asset { buffer, .. } => {
                     asset_ref = buffer.borrow();
                     &*asset_ref
                 }
@@ -851,11 +991,19 @@ impl Layer {
     pub fn link(&mut self, asset: &Asset) -> Result<(), LinkError> {
         match asset.link_ref() {
             AssetRef::Raster(rtex) => match &mut self.content {
-                LayerContent::Raster(Raster::Asset { buffer }) => *buffer = rtex.clone(),
+                LayerContent::Asset { buffer } => *buffer = rtex.clone(),
 
-                LayerContent::Raster(raster) => {
-                    println!("\x1b[1;95mwarning:\x1b[0m replacing artwork layer with linked asset");
-                    *raster = Raster::Asset {
+                raster @ LayerContent::Unique { .. } => {
+                    let buffer = match raster {
+                        LayerContent::Unique { buffer } => buffer,
+                        _ => unreachable!(),
+                    };
+                    if buffer.width() != 0 {
+                        println!(
+                            "\x1b[1;95mwarning:\x1b[0m replacing artwork layer with linked asset"
+                        );
+                    }
+                    *raster = LayerContent::Asset {
                         buffer: rtex.clone(),
                     }
                 }
@@ -924,6 +1072,38 @@ pub enum LoadError {
     AssetMismatch,
 }
 
+impl Serialize<&Assets> for Layers {
+    fn serialize<W>(&self, dst: &mut W, assets: &Assets) -> std::io::Result<()>
+    where
+        W: ?Sized + std::io::Write,
+    {
+        let Self { list, curr } = self;
+        list.serialize_slice(dst, || assets)
+            .and_then(|()| curr.serialize(dst, ()))
+    }
+}
+
+impl Deserialize<(&mut RaylibHandle, &RaylibThread, &Assets)> for Layers {
+    fn deserialize<R>(
+        src: &mut R,
+        ctx: (&mut RaylibHandle, &RaylibThread, &Assets),
+    ) -> std::io::Result<Self>
+    where
+        Self: Sized,
+        R: ?Sized + std::io::Read,
+    {
+        Ok(Self {
+            list: if false {
+                let len = usize::deserialize(src, ())?;
+                (0..len).map(|_| Layer::deserialize(src, ctx)).collect()
+            } else {
+                Vec::deserialize_slice(src, &mut ctx)
+            }?,
+            curr: usize::deserialize(src, ())?,
+        })
+    }
+}
+
 impl Layers {
     pub const fn new() -> Self {
         Self {
@@ -932,33 +1112,33 @@ impl Layers {
         }
     }
 
-    pub fn save<W: std::io::Write>(&self, dst: &mut W, assets: &Assets) -> Result<(), SaveError> {
-        let Self { list, curr } = self;
-        dst.write_all(&u64::try_from(list.len())?.to_le_bytes())?;
-        for layer in list {
-            layer.save(dst, assets)?;
-        }
-        dst.write_all(&u64::try_from(*curr)?.to_le_bytes())?;
-        Ok(())
-    }
+    // pub fn save<W: std::io::Write>(&self, dst: &mut W, assets: &Assets) -> Result<(), SaveError> {
+    //     let Self { list, curr } = self;
+    //     dst.write_all(&u64::try_from(list.len())?.to_le_bytes())?;
+    //     for layer in list {
+    //         layer.serialize(dst, assets)?;
+    //     }
+    //     dst.write_all(&u64::try_from(*curr)?.to_le_bytes())?;
+    //     Ok(())
+    // }
 
-    pub fn load<R: std::io::Read>(
-        src: &mut R,
-        rl: &mut RaylibHandle,
-        thread: &RaylibThread,
-        assets: &Assets,
-    ) -> Result<Self, LoadError> {
-        let mut list_len_bytes = [0; _];
-        src.read_exact(&mut list_len_bytes)?;
-        let list_len = u64::from_le_bytes(list_len_bytes).try_into()?;
-        let list = std::iter::repeat_with(|| Layer::load(src, rl, thread, assets))
-            .take(list_len)
-            .collect::<Result<_, _>>()?;
-        let mut curr_bytes = [0; _];
-        src.read_exact(&mut curr_bytes)?;
-        let curr = u64::from_le_bytes(curr_bytes).try_into()?;
-        Ok(Self { list, curr })
-    }
+    // pub fn load<R: std::io::Read>(
+    //     src: &mut R,
+    //     rl: &mut RaylibHandle,
+    //     thread: &RaylibThread,
+    //     assets: &Assets,
+    // ) -> Result<Self, LoadError> {
+    //     let mut list_len_bytes = [0; _];
+    //     src.read_exact(&mut list_len_bytes)?;
+    //     let list_len = u64::from_le_bytes(list_len_bytes).try_into()?;
+    //     let list = std::iter::repeat_with(|| Layer::deserialize(src, (rl, thread, assets)))
+    //         .take(list_len)
+    //         .collect::<Result<_, _>>()?;
+    //     let mut curr_bytes = [0; _];
+    //     src.read_exact(&mut curr_bytes)?;
+    //     let curr = u64::from_le_bytes(curr_bytes).try_into()?;
+    //     Ok(Self { list, curr })
+    // }
 
     pub const fn len(&self) -> usize {
         self.list.len()

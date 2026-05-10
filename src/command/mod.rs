@@ -1,6 +1,7 @@
 use crate::{
     asset::{Asset, AssetPos, Assets, RasterSrc, ShaderSrc},
     layer::{Layer, LayerPos, Layers, SaveError},
+    serde::{Deserialize, Serialize},
 };
 use clap::Parser;
 use raylib::prelude::*;
@@ -238,8 +239,10 @@ impl Command {
                     {
                         let contents = std::fs::read(path).map_err(SaveError::Io)?;
                         let mut data = contents.as_slice();
-                        *assets = Assets::load(&mut data, rl, thread)?;
-                        *layers = Layers::load(&mut data, rl, thread, assets)?;
+                        *assets =
+                            Assets::deserialize(&mut data, (rl, thread)).map_err(SaveError::Io)?;
+                        *layers = Layers::deserialize(&mut data, (rl, thread, assets))
+                            .map_err(SaveError::Io)?;
                     } else {
                         let asset = assets
                             .push(Asset::load_raster(
@@ -293,8 +296,10 @@ impl Command {
 
             Self::Quit {} => {
                 let mut contents = Vec::new();
-                assets.save(&mut contents)?;
-                layers.save(&mut contents, assets)?;
+                assets.serialize(&mut contents, ()).map_err(SaveError::Io)?;
+                layers
+                    .serialize(&mut contents, assets)
+                    .map_err(SaveError::Io)?;
                 std::fs::write(std::path::Path::new("session.amyfx"), &contents) // TODO: allow user to set this
                     .map_err(SaveError::Io)?;
                 return Ok(ControlFlow::Break(()));

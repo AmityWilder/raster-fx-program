@@ -2,6 +2,7 @@ use crate::{
     command::error::OpenFileError,
     error::IndexError,
     layer::{LoadError, SaveError, rtex_from_image},
+    serde::{Deserialize, DeserializeSlice, Serialize, SerializeSlice},
 };
 use clap::Args;
 use raylib::prelude::*;
@@ -40,6 +41,32 @@ impl FromStr for AssetPos {
                 s.parse().map(Self::Index).map_err(IndexInt)
             }
             _ => Err(Unknown(s.to_string())),
+        }
+    }
+}
+
+impl Serialize for AssetPos {
+    fn serialize<W>(&self, dst: &mut W, _: ()) -> std::io::Result<()>
+    where
+        W: ?Sized + std::io::Write,
+    {
+        match self {
+            AssetPos::Basic => b'*'.serialize(dst, ()),
+            AssetPos::Index(x) => b'#'.serialize(dst, ()).and_then(|()| x.serialize(dst, ())),
+        }
+    }
+}
+
+impl Deserialize for AssetPos {
+    fn deserialize<R>(src: &mut R, _: ()) -> std::io::Result<Self>
+    where
+        Self: Sized,
+        R: ?Sized + std::io::Read,
+    {
+        match u8::deserialize(src, ())? {
+            b'*' => Ok(Self::Basic),
+            b'#' => Deserialize::deserialize(src, ()).map(Self::Index),
+            _ => Err(std::io::Error::other(OpenFileError::Invalid)),
         }
     }
 }
@@ -92,6 +119,38 @@ pub enum RasterSrc {
     Layer(()),
 }
 
+impl Serialize for RasterSrc {
+    fn serialize<W>(&self, dst: &mut W, _: ()) -> std::io::Result<()>
+    where
+        W: ?Sized + std::io::Write,
+    {
+        match self {
+            Self::File(path) => b'f'
+                .serialize(dst, ())
+                .and_then(|()| path.serialize(dst, ())),
+            Self::Layer(()) => b'l'.serialize(dst, ()).and_then(|()| todo!()),
+        }
+    }
+}
+
+impl Deserialize for RasterSrc {
+    fn deserialize<R>(src: &mut R, _: ()) -> std::io::Result<Self>
+    where
+        Self: Sized,
+        R: ?Sized + std::io::Read,
+    {
+        match u8::deserialize(src, ())? {
+            b'f' => PathBuf::deserialize(src, ()).map(Self::File),
+
+            b'l' => todo!(),
+
+            x => Err(std::io::Error::other(format!(
+                "unknown variant: {x} ({x:#X})"
+            ))),
+        }
+    }
+}
+
 impl RasterSrc {
     fn load(
         &self,
@@ -125,6 +184,53 @@ pub struct ShaderSrc {
     /// Path to the fragment shader code file
     #[arg(short, long = "frag")]
     pub fs_path: Option<PathBuf>,
+}
+
+impl Serialize for ShaderSrc {
+    fn serialize<W>(&self, dst: &mut W, _: ()) -> std::io::Result<()>
+    where
+        W: ?Sized + std::io::Write,
+    {
+        match (self.vs_path.is_some(), self.fs_path.is_some()) {
+            (true, true) => b't',
+            (true, false) => b'v',
+            (false, true) => b'f',
+            (false, false) => b's',
+        }
+        .serialize(dst, ())?;
+        if let Some(path) = &self.vs_path {
+            path.serialize(dst, ())?;
+        }
+        if let Some(path) = &self.fs_path {
+            path.serialize(dst, ())?;
+        }
+        Ok(())
+    }
+}
+
+impl Deserialize for ShaderSrc {
+    fn deserialize<R>(src: &mut R, _: ()) -> std::io::Result<Self>
+    where
+        Self: Sized,
+        R: ?Sized + std::io::Read,
+    {
+        let (has_vs, has_fs) = match u8::deserialize(src, ())? {
+            b't' => (true, true),
+            b'v' => (true, false),
+            b'f' => (false, true),
+            b's' => (false, false),
+
+            x => {
+                return Err(std::io::Error::other(format!(
+                    "unknown variant: {x} ({x:#X})"
+                )));
+            }
+        };
+        Ok(Self {
+            vs_path: has_vs.then(|| PathBuf::deserialize(src, ())).transpose()?,
+            fs_path: has_fs.then(|| PathBuf::deserialize(src, ())).transpose()?,
+        })
+    }
 }
 
 impl ShaderSrc {
@@ -162,6 +268,60 @@ enum AssetContent {
     },
 }
 
+impl Serialize for AssetContent {
+    fn serialize<W>(&self, dst: &mut W, ctx: ()) -> std::io::Result<()>
+    where
+        W: ?Sized + std::io::Write,
+    {
+        match self {
+            Self::Raster { src, rtex: _ } => b'r'
+                .serialize(dst, ())
+                .and_then(|()| src.serialize(dst, ctx)),
+
+            Self::Shader { src, shader: _ } => b's'
+                .serialize(dst, ())
+                .and_then(|()| src.serialize(dst, ctx)),
+        }
+    }
+}
+
+impl Deserialize<(&mut RaylibHandle, &RaylibThread)> for AssetContent {
+    fn deserialize<R>(
+        src: &mut R,
+        (rl, thread): (&mut RaylibHandle, &RaylibThread),
+    ) -> std::io::Result<Self>
+    where
+        Self: Sized,
+        R: ?Sized + std::io::Read,
+    {
+        match u8::deserialize(src, ())? {
+            b'r' => {
+                let src = RasterSrc::deserialize(src, ())?;
+                Ok(Self::Raster {
+                    rtex: Rc::new(RefCell::new(
+                        src.load(rl, thread).map_err(std::io::Error::other)?,
+                    )),
+                    src,
+                })
+            }
+
+            b's' => {
+                let src = ShaderSrc::deserialize(src, ())?;
+                Ok(Self::Shader {
+                    shader: Rc::new(RefCell::new(
+                        src.load(rl, thread).map_err(std::io::Error::other)?,
+                    )),
+                    src,
+                })
+            }
+
+            x => Err(std::io::Error::other(format!(
+                "unknown variant: {x} ({x:#X})"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum AssetRef<'a> {
     Raster(&'a Rc<RefCell<RenderTexture2D>>),
@@ -172,6 +332,34 @@ pub enum AssetRef<'a> {
 pub struct Asset {
     pub name: String,
     data: AssetContent,
+}
+
+impl Serialize for Asset {
+    fn serialize<W>(&self, dst: &mut W, _: ()) -> std::io::Result<()>
+    where
+        W: ?Sized + std::io::Write,
+    {
+        let Self { name, data } = self;
+        name.serialize(dst, ())?;
+        data.serialize(dst, ())?;
+        Ok(())
+    }
+}
+
+impl Deserialize<(&mut RaylibHandle, &RaylibThread)> for Asset {
+    fn deserialize<R>(
+        src: &mut R,
+        (rl, thread): (&mut RaylibHandle, &RaylibThread),
+    ) -> std::io::Result<Self>
+    where
+        Self: Sized,
+        R: ?Sized + std::io::Read,
+    {
+        Ok(Self {
+            name: String::deserialize(src, ())?,
+            data: AssetContent::deserialize(src, (rl, thread))?,
+        })
+    }
 }
 
 impl Asset {
@@ -405,6 +593,29 @@ impl Asset {
 #[derive(Debug, Default)]
 pub struct Assets {
     list: Vec<Asset>,
+}
+
+impl Serialize for Assets {
+    fn serialize<W>(&self, dst: &mut W, _: ()) -> std::io::Result<()>
+    where
+        W: ?Sized + std::io::Write,
+    {
+        let Self { list } = self;
+        list.serialize_slice(dst, || ())
+    }
+}
+
+impl Deserialize<(&mut RaylibHandle, &RaylibThread)> for Assets {
+    fn deserialize<R>(
+        src: &mut R,
+        (rl, thread): (&mut RaylibHandle, &RaylibThread),
+    ) -> std::io::Result<Self>
+    where
+        Self: Sized,
+        R: ?Sized + std::io::Read,
+    {
+        Vec::deserialize_slice(src, |_| (rl, thread)).map(|list| Self { list })
+    }
 }
 
 impl Assets {

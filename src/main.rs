@@ -15,6 +15,7 @@
     reason = "avoid panics at all costs"
 )]
 #![warn(clippy::missing_const_for_fn, reason = "hygene")]
+#![feature(array_try_from_fn)]
 
 use crate::{
     asset::Assets,
@@ -36,6 +37,7 @@ mod command;
 mod error;
 mod layer;
 mod rlgl;
+mod serde;
 
 pub fn print_err_recursive(mut e: &dyn std::error::Error) {
     loop {
