@@ -1,7 +1,7 @@
 use crate::{
     asset_pos::{AssetPos, SelectAssetError},
-    command::error::{LinkError, OpenFileError},
-    layer::{Effect, Layer, rtex_from_image},
+    command::error::OpenFileError,
+    layer::rtex_from_image,
 };
 use clap::Args;
 use raylib::prelude::*;
@@ -85,6 +85,12 @@ enum AssetContent {
 }
 
 #[derive(Debug)]
+pub enum AssetRef<'a> {
+    Raster(&'a Rc<RefCell<RenderTexture2D>>),
+    Shader(&'a Rc<RefCell<Shader>>),
+}
+
+#[derive(Debug)]
 pub struct Asset {
     pub name: String,
     data: AssetContent,
@@ -146,19 +152,12 @@ impl Asset {
                 .map(|new_shader| *shader.borrow_mut() = new_shader),
         }
     }
-}
 
-impl Layer {
-    pub fn link(&mut self, assets: &Assets, at: AssetPos) -> Result<(), LinkError> {
-        match &assets.get(at)?.data {
-            AssetContent::Raster { .. } => todo!(),
-
-            AssetContent::Shader { shader, .. } => self.effects.push(Effect {
-                src: at,
-                asset: Rc::downgrade(shader),
-            }),
+    pub const fn link_ref(&self) -> AssetRef<'_> {
+        match &self.data {
+            AssetContent::Raster { rtex, .. } => AssetRef::Raster(rtex),
+            AssetContent::Shader { shader, .. } => AssetRef::Shader(shader),
         }
-        Ok(())
     }
 }
 

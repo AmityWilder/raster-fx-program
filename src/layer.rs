@@ -1,6 +1,6 @@
 use crate::{
-    asset_pos::AssetPos,
-    command::error::{NewLayerError, RemoveLayerError, ReorderLayersError},
+    asset::{Asset, AssetRef},
+    command::error::{LinkError, NewLayerError, RemoveLayerError, ReorderLayersError},
     layer_pos::{InsertLayerError, LayerPos, SelectLayerError},
     rlgl::*,
 };
@@ -67,7 +67,6 @@ pub fn rtex_from_image(
 
 #[derive(Debug)]
 pub struct Effect {
-    pub src: AssetPos,
     pub asset: Weak<RefCell<Shader>>,
 }
 
@@ -336,6 +335,28 @@ impl Layer {
             #[allow(clippy::arithmetic_side_effects)]
             &(transform * self.transform),
         )
+    }
+
+    pub fn link(&mut self, asset: &Asset) -> Result<(), LinkError> {
+        match asset.link_ref() {
+            AssetRef::Raster(rtex) => match &mut self.content {
+                LayerContent::Raster(Raster::Asset { buffer }) => *buffer = rtex.clone(),
+
+                LayerContent::Raster(raster) => {
+                    println!("\x1b[1;95mwarning:\x1b[0m replacing artwork layer with linked asset");
+                    *raster = Raster::Asset {
+                        buffer: rtex.clone(),
+                    }
+                }
+
+                LayerContent::Group { .. } => return Err(LinkError::OverrideGroup),
+            },
+
+            AssetRef::Shader(shader) => self.effects.push(Effect {
+                asset: Rc::downgrade(shader),
+            }),
+        }
+        Ok(())
     }
 }
 

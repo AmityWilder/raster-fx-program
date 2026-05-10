@@ -29,11 +29,11 @@ fn valid_layer_name(s: &str) -> Result<String, LayerNameError> {
 #[command(version)]
 pub enum Command {
     /// List the current layers in the open editor
-    #[command(name = "list", visible_alias = "ls")]
+    #[command(visible_alias = "ls")]
     List {
         /// List assets instead of layers
-        #[arg(short = 'a', long = "assets", action = clap::ArgAction::SetTrue)]
-        list_assets: bool,
+        #[arg(short, long, action = clap::ArgAction::SetTrue)]
+        assets: bool,
 
         /// Verbose debugging on layer list
         #[arg(short, long, action = clap::ArgAction::SetTrue)]
@@ -43,38 +43,35 @@ pub enum Command {
     /// Create one or more new layers
     #[command(name = "make", visible_alias = "mk")]
     Create {
-        /// Where to put the layer
-        at: LayerPos,
+        /// Create a group instead of a raster
+        #[arg(short = 'g', long = "group", action = clap::ArgAction::SetTrue)]
+        is_group: bool,
 
         /// The name of the layer to create
         #[arg(value_parser = valid_layer_name)]
         name: String,
 
-        /// Create a group instead of a raster
-        #[arg(short = 'g', long = "group", action = clap::ArgAction::SetTrue)]
-        is_group: bool,
+        /// Where to put the layer
+        #[arg(default_value = "*")]
+        at: LayerPos,
     },
 
     /// Link items together
-    #[command(name = "link", visible_alias = "l")]
+    #[command(visible_alias = "l")]
     Link {
-        /// The object to link
-        #[arg(short, long, group = "from")]
-        layer: Option<LayerPos>,
-
-        /// The object to link
-        #[arg(short, long, group = "from")]
-        asset: Option<AssetPos>,
+        /// The asset to link
+        from: AssetPos,
 
         /// The target to link with
+        #[arg(default_value = "*")]
         to: LayerPos,
     },
 
     /// Reload an asset
-    #[command(name = "reload", visible_alias = "re")]
+    #[command(visible_alias = "re")]
     Reload {
         /// Which asset to reload
-        on: AssetPos,
+        what: AssetPos,
     },
 
     /// Create one or more new layers
@@ -88,7 +85,7 @@ pub enum Command {
     },
 
     /// Remove one or more layers
-    #[command(name = "remove", visible_alias = "rm")]
+    #[command(visible_alias = "rm")]
     Remove {
         /// List of layer indices to remove
         ///
@@ -104,27 +101,11 @@ pub enum Command {
     },
 
     /// Open a file
-    ///
-    /// If the file is a `.png`, it will be inserted into a new layer above the current one
-    ///
-    /// If it is an `.amyfx` file, the current file will be closed and the provided one will open
-    ///
-    /// If it is a `.frag`/`.fs`, it will be loaded into resources as a fragment shader.\
-    /// If it is a `.vert`/`.vs`, it will be loaded into resources as a vertex shader.
-    #[command(name = "open", visible_alias = "o")]
+    #[command(visible_alias = "o")]
     Open {
         /// The name of the asset
         #[arg(short, long)]
         name: Option<String>,
-
-        /// Path to the file to open
-        ///
-        /// Sensitive to file extension:
-        ///
-        /// - ".png" will be loaded as a raster asset
-        /// - ".amyfx" will be loaded as an amyfx document
-        #[arg(short, long, exclusive = true)]
-        path: Option<PathBuf>,
 
         /// Path to the fragment shader
         #[arg(short, long = "frag")]
@@ -133,10 +114,26 @@ pub enum Command {
         /// Path to the vertex shader
         #[arg(short, long = "vert")]
         vs_path: Option<PathBuf>,
+
+        /// Path to the file to open
+        ///
+        /// Sensitive to file extension:
+        ///
+        /// ".png" will be loaded as a raster asset
+        ///
+        /// ".amyfx" will be loaded as an amyfx document
+        #[arg(conflicts_with_all = ["fs_path", "vs_path"])]
+        path: Option<PathBuf>,
+    },
+
+    #[command(visible_alias = "ex")]
+    Export {
+        /// Destination file to export to
+        path: PathBuf,
     },
 
     /// Close the application
-    #[command(name = "quit", visible_alias = "q")]
+    #[command(visible_alias = "q")]
     Quit,
 }
 
@@ -149,7 +146,10 @@ impl Command {
         layers: &mut Layers,
     ) -> Result<ControlFlow<()>, RunCommandError> {
         match self {
-            Self::List { list_assets, dbg } => {
+            Self::List {
+                assets: list_assets,
+                dbg,
+            } => {
                 if list_assets {
                     println!("\x1b[96massets: {{\x1b[0m");
                     for (i, asset) in assets.iter().enumerate().rev() {
@@ -205,28 +205,18 @@ impl Command {
                     })?;
             }
 
-            Self::Link { layer, asset, to } => {
-                match (layer, asset) {
-                    // from asset - effect
-                    (None, Some(from)) => {
-                        layers
-                            .get_mut(to)
-                            .map_err(LinkError::from)?
-                            .link(assets, from)?;
-                        println!("applied effect");
-                    }
-
-                    // from layer - clone layer
-                    (Some(_from), None) => {
-                        println!("not yet implemented");
-                    }
-
-                    _ => unreachable!("group must have exactly one option"),
-                };
+            Self::Link { from, to } => {
+                let asset = assets.get_mut(from).map_err(LinkError::from)?;
+                let layer = layers.get_mut(to).map_err(LinkError::from)?;
+                layer.link(asset)?;
+                println!(
+                    "\x1b[96mlinked asset\x1b[0m \"{}\" \x1b[96mto layer\x1b[0m \"{}\"",
+                    asset.name, layer.name
+                );
             }
 
-            Self::Reload { on } => {
-                let asset = assets.get_mut(on).map_err(ReloadAssetError::from)?;
+            Self::Reload { what } => {
+                let asset = assets.get_mut(what).map_err(ReloadAssetError::from)?;
                 asset.reload(rl, thread)?;
                 println!("\x1b[96masset \"{}\" reloaded\x1b[0m", asset.name);
             }
@@ -249,10 +239,10 @@ impl Command {
                     if let Some(ext) = path.extension()
                         && ext.eq_ignore_ascii_case("amyfx")
                     {
-                        println!("amyfx: not yet implemented");
+                        println!("\x1b[1;95mnot yet implemented\x1b[0m");
                         Err(Invalid)?
                     } else {
-                        assets
+                        let asset = assets
                             .push(Asset::load_raster(
                                 rl,
                                 thread,
@@ -264,12 +254,13 @@ impl Command {
                                 RasterSrc::File(path),
                             )?)
                             .map_err(OpenFileError::NoMemory)?;
+                        println!("\x1b[96mraster loaded:\x1b[0m \"{}\"", asset.name);
                     }
                 } else {
                     if fs_path.is_none() && vs_path.is_none() {
                         println!("\x1b[1;95mwarning:\x1b[0m no files to open");
                     } else {
-                        assets
+                        let asset = assets
                             .push(Asset::load_shader(
                                 rl,
                                 thread,
@@ -292,8 +283,13 @@ impl Command {
                                 ShaderSrc { fs_path, vs_path },
                             )?)
                             .map_err(OpenFileError::NoMemory)?;
+                        println!("\x1b[96mshader loaded:\x1b[0m \"{}\"", asset.name);
                     }
                 }
+            }
+
+            Self::Export { path: _ } => {
+                println!("\x1b[1;95mnot yet implemented\x1b[0m");
             }
 
             Self::Quit {} => return Ok(ControlFlow::Break(())),

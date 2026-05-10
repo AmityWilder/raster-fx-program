@@ -55,6 +55,9 @@ pub enum LinkError {
 
     #[error("cannot link layer")]
     SelectLayer(#[from] SelectLayerError),
+
+    #[error("cannot attach a raster to a group, put a layer inside it and link the asset to that")]
+    OverrideGroup,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Error)]
