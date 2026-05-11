@@ -86,15 +86,6 @@ impl Deserialize for AssetPos {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum PushAssetError {
-    #[error("cannot exceed {} assets on a {}-bit system", const { usize::MAX }, const { std::mem::size_of::<usize>() * 8 })]
-    TooManyAssets,
-
-    #[error("out of memory")]
-    AllocError(#[from] TryReserveError),
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Error)]
 pub enum SelectAssetError {
     #[error("asset {} does not exist", .0)]

@@ -36,7 +36,7 @@ mod asset;
 mod command;
 mod error;
 mod layer;
-mod rlgl;
+pub mod rlgl;
 mod serde;
 
 pub fn print_err_recursive(mut e: &dyn std::error::Error) {

@@ -332,7 +332,7 @@ impl Deserialize for String {
     where
         R: ?Sized + io::Read,
     {
-        let bytes = Vec::deserialize(src, &mut ()).map(Into::into)?;
+        let bytes = Vec::deserialize(src, &mut ())?;
         Self::from_utf8(bytes).map_err(DeStringError::Utf8)
     }
 }

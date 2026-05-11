@@ -17,7 +17,6 @@ use std::{
     collections::{BTreeSet, TryReserveError},
     rc::{Rc, Weak},
     str::FromStr,
-    string::FromUtf8Error,
 };
 use thiserror::Error;
 

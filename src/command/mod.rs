@@ -102,17 +102,9 @@ pub enum Command {
     /// Open a file
     #[command(visible_alias = "o")]
     Open {
-        /// The name of the asset
+        /// The name to give the asset, otherwise the filename will be used
         #[arg(short, long)]
         name: Option<String>,
-
-        /// Path to the fragment shader
-        #[arg(short, long = "frag")]
-        fs_path: Option<PathBuf>,
-
-        /// Path to the vertex shader
-        #[arg(short, long = "vert")]
-        vs_path: Option<PathBuf>,
 
         /// Path to the file to open
         ///
@@ -120,9 +112,15 @@ pub enum Command {
         ///
         /// ".png" will be loaded as a raster asset
         ///
+        /// ".vs"/".vert" will be loaded as a vertex shader asset
+        ///
+        /// ".fs"/".frag" will be loaded as a fragment shader asset
+        ///
         /// ".amyfx" will be loaded as an amyfx document
-        #[arg(conflicts_with_all = ["fs_path", "vs_path"])]
-        path: Option<PathBuf>,
+        ///
+        /// A shader may contain both a vertex and fragment shader
+        #[arg(num_args = 1..=2)]
+        paths: Vec<PathBuf>,
     },
 
     #[command(visible_alias = "ex")]
@@ -226,42 +224,61 @@ impl Command {
 
             Self::Target { to } => layers.set_target(to).map_err(SwitchLayerError::Select)?,
 
-            Self::Open {
-                name,
-                path,
-                fs_path,
-                vs_path,
-            } => {
-                if let Some(path) = path {
-                    assert!(fs_path.is_none() && vs_path.is_none());
-                    if let Some(ext) = path.extension()
-                        && ext.eq_ignore_ascii_case("amyfx")
-                    {
-                        let contents = std::fs::read(path)
-                            .map_err(Into::into)
-                            .map_err(LoadError::Deserialize)?;
-                        let mut data = contents.as_slice();
-                        *assets = Assets::deserialize(&mut data, &mut (rl, thread))
-                            .map_err(Into::into)
-                            .map_err(LoadError::Deserialize)?;
-                        *layers = Layers::deserialize(&mut data, &mut (rl, thread, assets))
-                            .map_err(LoadError::Deserialize)?;
-                    } else {
-                        let asset = assets
-                            .push(Asset::load_raster(
-                                rl,
-                                thread,
-                                name.or_else(|| {
-                                    path.file_name()
-                                        .map(|filename| filename.to_string_lossy().to_string())
-                                })
-                                .unwrap_or_else(|| format!("asset {}", assets.len())),
-                                RasterSrc::File(path),
-                            )?)
-                            .map_err(OpenFileError::NoMemory)?;
-                        println!("\x1b[96mraster loaded:\x1b[0m \"{}\"", asset.name);
-                    }
+            Self::Open { name, paths } => {
+                if let [path] = paths.as_slice()
+                    && let ext = path.extension().unwrap_or_default()
+                    && ext.eq_ignore_ascii_case("amyfx")
+                {
+                    let contents = std::fs::read(path)
+                        .map_err(Into::into)
+                        .map_err(LoadError::Deserialize)?;
+                    let mut data = contents.as_slice();
+                    *assets = Assets::deserialize(&mut data, &mut (rl, thread))
+                        .map_err(Into::into)
+                        .map_err(LoadError::Deserialize)?;
+                    *layers = Layers::deserialize(&mut data, &mut (rl, thread, assets))
+                        .map_err(LoadError::Deserialize)?;
+                } else if let [path] = paths.as_slice()
+                    && let Some(ext) = path.extension()
+                    && ext.eq_ignore_ascii_case("png")
+                {
+                    let asset = assets
+                        .push(Asset::load_raster(
+                            rl,
+                            thread,
+                            name.or_else(|| {
+                                path.file_name()
+                                    .map(|filename| filename.to_string_lossy().to_string())
+                            })
+                            .unwrap_or_else(|| format!("asset {}", assets.len())),
+                            RasterSrc::File(
+                                paths.into_iter().next().expect("guaranteed by branch"),
+                            ),
+                        )?)
+                        .map_err(OpenFileError::NoMemory)?;
+                    println!("\x1b[96mraster loaded:\x1b[0m \"{}\"", asset.name);
                 } else {
+                    let mut vs_path = None;
+                    let mut fs_path = None;
+                    for path in paths {
+                        let ext = path.extension().unwrap_or_default();
+                        if ext.eq_ignore_ascii_case("vs") || ext.eq_ignore_ascii_case("vert") {
+                            if vs_path.is_some() {
+                                println!(
+                                    "\x1b[1;95mwarning:\x1b[0m multiple vertex shaders, using the last one"
+                                );
+                            }
+                            vs_path = Some(path);
+                        } else if ext.eq_ignore_ascii_case("fs") || ext.eq_ignore_ascii_case("frag")
+                        {
+                            if fs_path.is_some() {
+                                println!(
+                                    "\x1b[1;95mwarning:\x1b[0m multiple fragment shaders, using the last one"
+                                );
+                            }
+                            fs_path = Some(path);
+                        }
+                    }
                     if fs_path.is_none() && vs_path.is_none() {
                         println!("\x1b[1;95mwarning:\x1b[0m no files to open");
                     } else {
