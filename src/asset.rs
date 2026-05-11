@@ -46,26 +46,28 @@ impl FromStr for AssetPos {
 }
 
 impl Serialize for AssetPos {
-    fn serialize<W>(&self, dst: &mut W, _: ()) -> std::io::Result<()>
+    fn serialize<W>(&self, dst: &mut W, _: &()) -> std::io::Result<()>
     where
         W: ?Sized + std::io::Write,
     {
         match self {
-            AssetPos::Basic => b'*'.serialize(dst, ()),
-            AssetPos::Index(x) => b'#'.serialize(dst, ()).and_then(|()| x.serialize(dst, ())),
+            AssetPos::Basic => b'*'.serialize(dst, &()),
+            AssetPos::Index(x) => b'#'
+                .serialize(dst, &())
+                .and_then(|()| x.serialize(dst, &())),
         }
     }
 }
 
 impl Deserialize for AssetPos {
-    fn deserialize<R>(src: &mut R, _: ()) -> std::io::Result<Self>
+    fn deserialize<R>(src: &mut R, _: &mut ()) -> std::io::Result<Self>
     where
         Self: Sized,
         R: ?Sized + std::io::Read,
     {
-        match u8::deserialize(src, ())? {
+        match u8::deserialize(src, &mut ())? {
             b'*' => Ok(Self::Basic),
-            b'#' => Deserialize::deserialize(src, ()).map(Self::Index),
+            b'#' => Deserialize::deserialize(src, &mut ()).map(Self::Index),
             _ => Err(std::io::Error::other(OpenFileError::Invalid)),
         }
     }
@@ -120,27 +122,27 @@ pub enum RasterSrc {
 }
 
 impl Serialize for RasterSrc {
-    fn serialize<W>(&self, dst: &mut W, _: ()) -> std::io::Result<()>
+    fn serialize<W>(&self, dst: &mut W, _: &()) -> std::io::Result<()>
     where
         W: ?Sized + std::io::Write,
     {
         match self {
             Self::File(path) => b'f'
-                .serialize(dst, ())
-                .and_then(|()| path.serialize(dst, ())),
-            Self::Layer(()) => b'l'.serialize(dst, ()).and_then(|()| todo!()),
+                .serialize(dst, &())
+                .and_then(|()| path.serialize(dst, &())),
+            Self::Layer(()) => b'l'.serialize(dst, &()).and_then(|()| todo!()),
         }
     }
 }
 
 impl Deserialize for RasterSrc {
-    fn deserialize<R>(src: &mut R, _: ()) -> std::io::Result<Self>
+    fn deserialize<R>(src: &mut R, _: &mut ()) -> std::io::Result<Self>
     where
         Self: Sized,
         R: ?Sized + std::io::Read,
     {
-        match u8::deserialize(src, ())? {
-            b'f' => PathBuf::deserialize(src, ()).map(Self::File),
+        match u8::deserialize(src, &mut ())? {
+            b'f' => PathBuf::deserialize(src, &mut ()).map(Self::File),
 
             b'l' => todo!(),
 
@@ -187,7 +189,7 @@ pub struct ShaderSrc {
 }
 
 impl Serialize for ShaderSrc {
-    fn serialize<W>(&self, dst: &mut W, _: ()) -> std::io::Result<()>
+    fn serialize<W>(&self, dst: &mut W, _: &()) -> std::io::Result<()>
     where
         W: ?Sized + std::io::Write,
     {
@@ -197,24 +199,24 @@ impl Serialize for ShaderSrc {
             (false, true) => b'f',
             (false, false) => b's',
         }
-        .serialize(dst, ())?;
+        .serialize(dst, &())?;
         if let Some(path) = &self.vs_path {
-            path.serialize(dst, ())?;
+            path.serialize(dst, &())?;
         }
         if let Some(path) = &self.fs_path {
-            path.serialize(dst, ())?;
+            path.serialize(dst, &())?;
         }
         Ok(())
     }
 }
 
 impl Deserialize for ShaderSrc {
-    fn deserialize<R>(src: &mut R, _: ()) -> std::io::Result<Self>
+    fn deserialize<R>(src: &mut R, _: &mut ()) -> std::io::Result<Self>
     where
         Self: Sized,
         R: ?Sized + std::io::Read,
     {
-        let (has_vs, has_fs) = match u8::deserialize(src, ())? {
+        let (has_vs, has_fs) = match u8::deserialize(src, &mut ())? {
             b't' => (true, true),
             b'v' => (true, false),
             b'f' => (false, true),
@@ -227,8 +229,12 @@ impl Deserialize for ShaderSrc {
             }
         };
         Ok(Self {
-            vs_path: has_vs.then(|| PathBuf::deserialize(src, ())).transpose()?,
-            fs_path: has_fs.then(|| PathBuf::deserialize(src, ())).transpose()?,
+            vs_path: has_vs
+                .then(|| PathBuf::deserialize(src, &mut ()))
+                .transpose()?,
+            fs_path: has_fs
+                .then(|| PathBuf::deserialize(src, &mut ()))
+                .transpose()?,
         })
     }
 }
@@ -269,18 +275,18 @@ enum AssetContent {
 }
 
 impl Serialize for AssetContent {
-    fn serialize<W>(&self, dst: &mut W, ctx: ()) -> std::io::Result<()>
+    fn serialize<W>(&self, dst: &mut W, _: &()) -> std::io::Result<()>
     where
         W: ?Sized + std::io::Write,
     {
         match self {
             Self::Raster { src, rtex: _ } => b'r'
-                .serialize(dst, ())
-                .and_then(|()| src.serialize(dst, ctx)),
+                .serialize(dst, &())
+                .and_then(|()| src.serialize(dst, &())),
 
             Self::Shader { src, shader: _ } => b's'
-                .serialize(dst, ())
-                .and_then(|()| src.serialize(dst, ctx)),
+                .serialize(dst, &())
+                .and_then(|()| src.serialize(dst, &())),
         }
     }
 }
@@ -288,15 +294,15 @@ impl Serialize for AssetContent {
 impl Deserialize<(&mut RaylibHandle, &RaylibThread)> for AssetContent {
     fn deserialize<R>(
         src: &mut R,
-        (rl, thread): (&mut RaylibHandle, &RaylibThread),
+        (rl, thread): &mut (&mut RaylibHandle, &RaylibThread),
     ) -> std::io::Result<Self>
     where
         Self: Sized,
         R: ?Sized + std::io::Read,
     {
-        match u8::deserialize(src, ())? {
+        match u8::deserialize(src, &mut ())? {
             b'r' => {
-                let src = RasterSrc::deserialize(src, ())?;
+                let src = RasterSrc::deserialize(src, &mut ())?;
                 Ok(Self::Raster {
                     rtex: Rc::new(RefCell::new(
                         src.load(rl, thread).map_err(std::io::Error::other)?,
@@ -306,7 +312,7 @@ impl Deserialize<(&mut RaylibHandle, &RaylibThread)> for AssetContent {
             }
 
             b's' => {
-                let src = ShaderSrc::deserialize(src, ())?;
+                let src = ShaderSrc::deserialize(src, &mut ())?;
                 Ok(Self::Shader {
                     shader: Rc::new(RefCell::new(
                         src.load(rl, thread).map_err(std::io::Error::other)?,
@@ -335,13 +341,13 @@ pub struct Asset {
 }
 
 impl Serialize for Asset {
-    fn serialize<W>(&self, dst: &mut W, _: ()) -> std::io::Result<()>
+    fn serialize<W>(&self, dst: &mut W, _: &()) -> std::io::Result<()>
     where
         W: ?Sized + std::io::Write,
     {
         let Self { name, data } = self;
-        name.serialize(dst, ())?;
-        data.serialize(dst, ())?;
+        name.serialize(dst, &())?;
+        data.serialize(dst, &())?;
         Ok(())
     }
 }
@@ -349,15 +355,15 @@ impl Serialize for Asset {
 impl Deserialize<(&mut RaylibHandle, &RaylibThread)> for Asset {
     fn deserialize<R>(
         src: &mut R,
-        (rl, thread): (&mut RaylibHandle, &RaylibThread),
+        ctx: &mut (&mut RaylibHandle, &RaylibThread),
     ) -> std::io::Result<Self>
     where
         Self: Sized,
         R: ?Sized + std::io::Read,
     {
         Ok(Self {
-            name: String::deserialize(src, ())?,
-            data: AssetContent::deserialize(src, (rl, thread))?,
+            name: String::deserialize(src, &mut ())?,
+            data: AssetContent::deserialize(src, ctx)?,
         })
     }
 }
@@ -425,168 +431,6 @@ impl Asset {
             AssetContent::Shader { shader, .. } => AssetRef::Shader(shader),
         }
     }
-
-    pub fn save<W: std::io::Write>(&self, dst: &mut W) -> Result<(), SaveError> {
-        let Self { name, data } = self;
-        dst.write_all(&u64::try_from(name.len())?.to_le_bytes())?;
-        dst.write_all(name.as_bytes())?;
-        match data {
-            AssetContent::Raster { src, rtex: _ } => match src {
-                RasterSrc::File(path) => {
-                    dst.write_all(b"r")?;
-                    let path = path.canonicalize()?; // defend against amyfx file getting moved (we cant deal with the resource moving)
-                    let path = path.as_os_str().as_encoded_bytes();
-                    dst.write_all(&path.len().to_le_bytes())?;
-                    dst.write_all(path)?;
-                }
-                RasterSrc::Layer(_) => println!("not yet implemented"),
-            },
-
-            AssetContent::Shader {
-                src: ShaderSrc { vs_path, fs_path },
-                shader: _,
-            } => {
-                dst.write_all(&[match (vs_path.is_some(), fs_path.is_some()) {
-                    (true, true) => b't',
-                    (true, false) => b'v',
-                    (false, true) => b'f',
-                    (false, false) => b's',
-                }])?;
-                if let Some(path) = vs_path {
-                    let path = path.canonicalize()?; // defend against amyfx file getting moved (we cant deal with the resource moving)
-                    let path = path.as_os_str().as_encoded_bytes();
-                    dst.write_all(&path.len().to_le_bytes())?;
-                    dst.write_all(path)?;
-                }
-                if let Some(path) = fs_path {
-                    let path = path.canonicalize()?; // defend against amyfx file getting moved (we cant deal with the resource moving)
-                    let path = path.as_os_str().as_encoded_bytes();
-                    dst.write_all(&path.len().to_le_bytes())?;
-                    dst.write_all(path)?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    pub fn load<R: std::io::Read>(
-        src: &mut R,
-        rl: &mut RaylibHandle,
-        thread: &RaylibThread,
-    ) -> Result<Self, LoadError> {
-        let mut name_len_bytes = [0; _];
-        src.read_exact(&mut name_len_bytes)?;
-        let name_len = u64::from_le_bytes(name_len_bytes).try_into()?;
-        let mut name_bytes = vec![0; name_len];
-        src.read_exact(&mut name_bytes)?;
-        let name = String::from_utf8(name_bytes)?;
-        let mut tag = 0;
-        src.read_exact(std::slice::from_mut(&mut tag))?;
-        // TODO: make this less gross
-        match tag {
-            b'r' => {
-                let mut path_len_bytes = [0; _];
-                src.read_exact(&mut path_len_bytes)?;
-                let path_len = u64::from_le_bytes(path_len_bytes).try_into()?;
-                let mut path_bytes = vec![0; path_len];
-                src.read_exact(&mut path_bytes)?;
-                // SAFETY: TBD
-                let path = PathBuf::from(unsafe {
-                    std::ffi::OsString::from_encoded_bytes_unchecked(path_bytes)
-                });
-                Self::load_raster(rl, thread, name, RasterSrc::File(path))
-                    .map_err(LoadError::OpenFile)
-            }
-
-            b't' => {
-                let mut path_len_bytes = [0; _];
-                src.read_exact(&mut path_len_bytes)?;
-                let path_len = u64::from_le_bytes(path_len_bytes).try_into()?;
-                let mut path_bytes = vec![0; path_len];
-                src.read_exact(&mut path_bytes)?;
-                // SAFETY: TBD
-                let vs_path = PathBuf::from(unsafe {
-                    std::ffi::OsString::from_encoded_bytes_unchecked(path_bytes)
-                });
-                let mut path_len_bytes = [0; _];
-                src.read_exact(&mut path_len_bytes)?;
-                let path_len = u64::from_le_bytes(path_len_bytes).try_into()?;
-                let mut path_bytes = vec![0; path_len];
-                src.read_exact(&mut path_bytes)?;
-                // SAFETY: TBD
-                let fs_path = PathBuf::from(unsafe {
-                    std::ffi::OsString::from_encoded_bytes_unchecked(path_bytes)
-                });
-                Self::load_shader(
-                    rl,
-                    thread,
-                    name,
-                    ShaderSrc {
-                        vs_path: Some(vs_path),
-                        fs_path: Some(fs_path),
-                    },
-                )
-                .map_err(LoadError::OpenFile)
-            }
-
-            b'v' => {
-                let mut path_len_bytes = [0; _];
-                src.read_exact(&mut path_len_bytes)?;
-                let path_len = u64::from_le_bytes(path_len_bytes).try_into()?;
-                let mut path_bytes = vec![0; path_len];
-                src.read_exact(&mut path_bytes)?;
-                // SAFETY: TBD
-                let path = PathBuf::from(unsafe {
-                    std::ffi::OsString::from_encoded_bytes_unchecked(path_bytes)
-                });
-                Self::load_shader(
-                    rl,
-                    thread,
-                    name,
-                    ShaderSrc {
-                        vs_path: Some(path),
-                        fs_path: None,
-                    },
-                )
-                .map_err(LoadError::OpenFile)
-            }
-
-            b'f' => {
-                let mut path_len_bytes = [0; _];
-                src.read_exact(&mut path_len_bytes)?;
-                let path_len = u64::from_le_bytes(path_len_bytes).try_into()?;
-                let mut path_bytes = vec![0; path_len];
-                src.read_exact(&mut path_bytes)?;
-                // SAFETY: TBD
-                let path = PathBuf::from(unsafe {
-                    std::ffi::OsString::from_encoded_bytes_unchecked(path_bytes)
-                });
-                Self::load_shader(
-                    rl,
-                    thread,
-                    name,
-                    ShaderSrc {
-                        vs_path: None,
-                        fs_path: Some(path),
-                    },
-                )
-                .map_err(LoadError::OpenFile)
-            }
-
-            b's' => Self::load_shader(
-                rl,
-                thread,
-                name,
-                ShaderSrc {
-                    vs_path: None,
-                    fs_path: None,
-                },
-            )
-            .map_err(LoadError::OpenFile),
-
-            _ => todo!("tag: {tag:#X}"), // Err(LoadError::Invalid),
-        }
-    }
 }
 
 /// Uses [`AssetPos`] instead of [`usize`]
@@ -596,53 +440,31 @@ pub struct Assets {
 }
 
 impl Serialize for Assets {
-    fn serialize<W>(&self, dst: &mut W, _: ()) -> std::io::Result<()>
+    fn serialize<W>(&self, dst: &mut W, _: &()) -> std::io::Result<()>
     where
         W: ?Sized + std::io::Write,
     {
         let Self { list } = self;
-        list.serialize_slice(dst, || ())
+        list.serialize_slice(dst, &())
     }
 }
 
 impl Deserialize<(&mut RaylibHandle, &RaylibThread)> for Assets {
     fn deserialize<R>(
         src: &mut R,
-        (rl, thread): (&mut RaylibHandle, &RaylibThread),
+        ctx: &mut (&mut RaylibHandle, &RaylibThread),
     ) -> std::io::Result<Self>
     where
         Self: Sized,
         R: ?Sized + std::io::Read,
     {
-        Vec::deserialize_slice(src, |_| (rl, thread)).map(|list| Self { list })
+        Vec::deserialize_slice(src, ctx).map(|list| Self { list })
     }
 }
 
 impl Assets {
     pub const fn new() -> Self {
         Self { list: Vec::new() }
-    }
-
-    pub fn save<W: std::io::Write>(&self, dst: &mut W) -> Result<(), SaveError> {
-        dst.write_all(&u64::try_from(self.list.len())?.to_le_bytes())?;
-        for asset in &self.list {
-            asset.save(dst)?;
-        }
-        Ok(())
-    }
-
-    pub fn load<R: std::io::Read>(
-        src: &mut R,
-        rl: &mut RaylibHandle,
-        thread: &RaylibThread,
-    ) -> Result<Self, LoadError> {
-        let mut list_len_bytes = [0; _];
-        src.read_exact(&mut list_len_bytes)?;
-        let list_len = u64::from_le_bytes(list_len_bytes).try_into()?;
-        let list = std::iter::repeat_with(|| Asset::load(src, rl, thread))
-            .take(list_len)
-            .collect::<Result<_, _>>()?;
-        Ok(Self { list })
     }
 
     pub const fn len(&self) -> usize {

@@ -239,9 +239,9 @@ impl Command {
                     {
                         let contents = std::fs::read(path).map_err(SaveError::Io)?;
                         let mut data = contents.as_slice();
-                        *assets =
-                            Assets::deserialize(&mut data, (rl, thread)).map_err(SaveError::Io)?;
-                        *layers = Layers::deserialize(&mut data, (rl, thread, assets))
+                        *assets = Assets::deserialize(&mut data, &mut (rl, thread))
+                            .map_err(SaveError::Io)?;
+                        *layers = Layers::deserialize(&mut data, &mut (rl, thread, assets))
                             .map_err(SaveError::Io)?;
                     } else {
                         let asset = assets
@@ -296,9 +296,11 @@ impl Command {
 
             Self::Quit {} => {
                 let mut contents = Vec::new();
-                assets.serialize(&mut contents, ()).map_err(SaveError::Io)?;
+                assets
+                    .serialize(&mut contents, &())
+                    .map_err(SaveError::Io)?;
                 layers
-                    .serialize(&mut contents, assets)
+                    .serialize(&mut contents, &&*assets)
                     .map_err(SaveError::Io)?;
                 std::fs::write(std::path::Path::new("session.amyfx"), &contents) // TODO: allow user to set this
                     .map_err(SaveError::Io)?;
