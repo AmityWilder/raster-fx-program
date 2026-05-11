@@ -1,15 +1,20 @@
 use crate::layer::rtex_from_image;
 use raylib::prelude::*;
 use std::io;
+use thiserror::Error;
 
 pub trait Serialize<Ctx: ?Sized = ()> {
-    fn serialize<W>(&self, dst: &mut W, ctx: &Ctx) -> io::Result<()>
+    type Error;
+
+    fn serialize<W>(&self, dst: &mut W, ctx: &Ctx) -> Result<(), Self::Error>
     where
         W: ?Sized + io::Write;
 }
 
 pub trait Deserialize<Ctx: ?Sized = ()> {
-    fn deserialize<R>(src: &mut R, ctx: &mut Ctx) -> io::Result<Self>
+    type Error;
+
+    fn deserialize<R>(src: &mut R, ctx: &mut Ctx) -> Result<Self, Self::Error>
     where
         Self: Sized,
         R: ?Sized + io::Read;
@@ -17,16 +22,18 @@ pub trait Deserialize<Ctx: ?Sized = ()> {
 
 pub trait SerializeArr<Ctx: ?Sized = ()> {
     type Item;
+    type Error;
 
-    fn serialize_arr<W>(&self, dst: &mut W, ctx: &Ctx) -> io::Result<()>
+    fn serialize_arr<W>(&self, dst: &mut W, ctx: &Ctx) -> Result<(), Self::Error>
     where
         W: ?Sized + io::Write;
 }
 
 pub trait DeserializeArr<Ctx: ?Sized = ()> {
     type Item;
+    type Error;
 
-    fn deserialize_arr<R>(src: &mut R, ctx: &mut Ctx) -> io::Result<Self>
+    fn deserialize_arr<R>(src: &mut R, ctx: &mut Ctx) -> Result<Self, Self::Error>
     where
         Self: Sized,
         R: ?Sized + io::Read;
@@ -34,14 +41,17 @@ pub trait DeserializeArr<Ctx: ?Sized = ()> {
 
 pub trait SerializeSlice<Ctx: ?Sized = ()> {
     type Item;
+    type Error;
 
-    fn serialize_slice<W>(&self, dst: &mut W, ctx: &Ctx) -> io::Result<()>
+    fn serialize_slice<W>(&self, dst: &mut W, ctx: &Ctx) -> Result<(), Self::Error>
     where
         W: ?Sized + io::Write;
 }
 
 pub trait DeserializeSlice<T, Ctx: ?Sized = ()> {
-    fn deserialize_slice<R>(src: &mut R, ctx: &mut Ctx) -> io::Result<Self>
+    type Error;
+
+    fn deserialize_slice<R>(src: &mut R, ctx: &mut Ctx) -> Result<Self, Self::Error>
     where
         Self: Sized,
         R: ?Sized + io::Read;
@@ -52,8 +62,9 @@ where
     T: Serialize<Ctx>,
 {
     type Item = T;
+    type Error = T::Error;
 
-    fn serialize_arr<W>(&self, dst: &mut W, ctx: &Ctx) -> io::Result<()>
+    fn serialize_arr<W>(&self, dst: &mut W, ctx: &Ctx) -> Result<(), Self::Error>
     where
         W: ?Sized + io::Write,
     {
@@ -66,8 +77,9 @@ where
     T: Deserialize<Ctx>,
 {
     type Item = T;
+    type Error = T::Error;
 
-    fn deserialize_arr<R>(src: &mut R, ctx: &mut Ctx) -> io::Result<Self>
+    fn deserialize_arr<R>(src: &mut R, ctx: &mut Ctx) -> Result<Self, Self::Error>
     where
         Self: Sized,
         R: ?Sized + io::Read,
@@ -79,14 +91,16 @@ where
 impl<T, Ctx> SerializeSlice<Ctx> for [T]
 where
     T: Serialize<Ctx>,
+    SerUsizeError: Into<T::Error>,
 {
     type Item = T;
+    type Error = T::Error;
 
-    fn serialize_slice<W>(&self, dst: &mut W, ctx: &Ctx) -> io::Result<()>
+    fn serialize_slice<W>(&self, dst: &mut W, ctx: &Ctx) -> Result<(), Self::Error>
     where
         W: ?Sized + io::Write,
     {
-        self.len().serialize(dst, &())?;
+        self.len().serialize(dst, &()).map_err(Into::into)?;
         self.iter().try_for_each(|item| item.serialize(dst, ctx))
     }
 }
@@ -94,20 +108,25 @@ where
 impl<T, Ctx, FromT> DeserializeSlice<T, Ctx> for FromT
 where
     T: Deserialize<Ctx>,
+    DeUsizeError: Into<T::Error>,
     FromT: FromIterator<T>,
 {
-    fn deserialize_slice<R>(src: &mut R, ctx: &mut Ctx) -> io::Result<Self>
+    type Error = T::Error;
+
+    fn deserialize_slice<R>(src: &mut R, ctx: &mut Ctx) -> Result<Self, Self::Error>
     where
         Self: Sized,
         R: ?Sized + io::Read,
     {
-        let len = usize::deserialize(src, &mut ())?;
+        let len = usize::deserialize(src, &mut ()).map_err(Into::into)?;
         (0..len).map(|_| T::deserialize(src, ctx)).collect()
     }
 }
 
 impl Serialize for u8 {
-    fn serialize<W>(&self, dst: &mut W, _: &()) -> io::Result<()>
+    type Error = io::Error;
+
+    fn serialize<W>(&self, dst: &mut W, _: &()) -> Result<(), Self::Error>
     where
         W: ?Sized + io::Write,
     {
@@ -116,7 +135,9 @@ impl Serialize for u8 {
 }
 
 impl Deserialize for u8 {
-    fn deserialize<R>(src: &mut R, _: &mut ()) -> io::Result<Self>
+    type Error = io::Error;
+
+    fn deserialize<R>(src: &mut R, _: &mut ()) -> Result<Self, Self::Error>
     where
         R: ?Sized + io::Read,
     {
@@ -127,7 +148,9 @@ impl Deserialize for u8 {
 }
 
 impl<const N: usize> Serialize for [u8; N] {
-    fn serialize<W>(&self, dst: &mut W, _: &()) -> io::Result<()>
+    type Error = io::Error;
+
+    fn serialize<W>(&self, dst: &mut W, _: &()) -> Result<(), Self::Error>
     where
         W: ?Sized + io::Write,
     {
@@ -136,7 +159,9 @@ impl<const N: usize> Serialize for [u8; N] {
 }
 
 impl<const N: usize> Deserialize for [u8; N] {
-    fn deserialize<R>(src: &mut R, _: &mut ()) -> io::Result<Self>
+    type Error = io::Error;
+
+    fn deserialize<R>(src: &mut R, _: &mut ()) -> Result<Self, Self::Error>
     where
         R: ?Sized + io::Read,
     {
@@ -147,17 +172,21 @@ impl<const N: usize> Deserialize for [u8; N] {
 }
 
 impl Serialize for [u8] {
-    fn serialize<W>(&self, dst: &mut W, _: &()) -> io::Result<()>
+    type Error = SerUsizeError;
+
+    fn serialize<W>(&self, dst: &mut W, _: &()) -> Result<(), Self::Error>
     where
         W: ?Sized + io::Write,
     {
         self.len().serialize(dst, &())?;
-        dst.write_all(self)
+        dst.write_all(self).map_err(SerUsizeError::Write)
     }
 }
 
 impl Deserialize for Vec<u8> {
-    fn deserialize<R>(src: &mut R, _: &mut ()) -> io::Result<Self>
+    type Error = DeUsizeError;
+
+    fn deserialize<R>(src: &mut R, _: &mut ()) -> Result<Self, Self::Error>
     where
         R: ?Sized + io::Read,
     {
@@ -171,7 +200,9 @@ impl Deserialize for Vec<u8> {
 macro_rules! serde_int {
     ($($Type:ident),*) => {$(
         impl Serialize for $Type {
-            fn serialize<W>(&self, dst: &mut W, _: &()) -> io::Result<()>
+            type Error = io::Error;
+
+            fn serialize<W>(&self, dst: &mut W, _: &()) -> Result<(), Self::Error>
             where
                 W: ?Sized + io::Write
             {
@@ -180,7 +211,9 @@ macro_rules! serde_int {
         }
 
         impl Deserialize for $Type {
-            fn deserialize<R>(src: &mut R, _: &mut ()) -> io::Result<Self>
+            type Error = io::Error;
+
+            fn deserialize<R>(src: &mut R, _: &mut ()) -> Result<Self, Self::Error>
             where
                 R: ?Sized + io::Read
             {
@@ -192,32 +225,54 @@ macro_rules! serde_int {
 
 serde_int!(u16, u32, u64, u128, i8, i16, i32, i64, i128);
 
+#[derive(Debug, Error)]
+pub enum SerUsizeError {
+    #[error(transparent)]
+    Conversion(#[from] std::num::TryFromIntError),
+
+    #[error(transparent)]
+    Write(#[from] io::Error),
+}
+
 impl Serialize for usize {
-    fn serialize<W>(&self, dst: &mut W, _: &()) -> io::Result<()>
+    type Error = SerUsizeError;
+
+    fn serialize<W>(&self, dst: &mut W, _: &()) -> Result<(), Self::Error>
     where
         W: ?Sized + io::Write,
     {
-        match u64::try_from(*self).map_err(io::Error::other) {
-            Ok(x) => x.serialize(dst, &()),
-            Err(e) => Err(e),
-        }
+        u64::try_from(*self)?
+            .serialize(dst, &())
+            .map_err(Into::into)
     }
 }
 
+#[derive(Debug, Error)]
+pub enum DeUsizeError {
+    #[error(transparent)]
+    Conversion(#[from] std::num::TryFromIntError),
+
+    #[error(transparent)]
+    Read(#[from] io::Error),
+}
+
 impl Deserialize for usize {
-    fn deserialize<R>(src: &mut R, _: &mut ()) -> io::Result<Self>
+    type Error = DeUsizeError;
+
+    fn deserialize<R>(src: &mut R, _: &mut ()) -> Result<Self, Self::Error>
     where
         R: ?Sized + io::Read,
     {
-        match u64::deserialize(src, &mut ()) {
-            Ok(x) => Self::try_from(x).map_err(io::Error::other),
-            Err(e) => Err(e),
-        }
+        u64::deserialize(src, &mut ())?
+            .try_into()
+            .map_err(Into::into)
     }
 }
 
 impl Serialize for isize {
-    fn serialize<W>(&self, dst: &mut W, _: &()) -> io::Result<()>
+    type Error = io::Error;
+
+    fn serialize<W>(&self, dst: &mut W, _: &()) -> Result<(), Self::Error>
     where
         W: ?Sized + io::Write,
     {
@@ -228,7 +283,9 @@ impl Serialize for isize {
 }
 
 impl Deserialize for isize {
-    fn deserialize<R>(src: &mut R, _: &mut ()) -> io::Result<Self>
+    type Error = io::Error;
+
+    fn deserialize<R>(src: &mut R, _: &mut ()) -> Result<Self, Self::Error>
     where
         R: ?Sized + io::Read,
     {
@@ -237,7 +294,9 @@ impl Deserialize for isize {
 }
 
 impl Serialize for str {
-    fn serialize<W>(&self, dst: &mut W, _: &()) -> io::Result<()>
+    type Error = SerUsizeError;
+
+    fn serialize<W>(&self, dst: &mut W, _: &()) -> Result<(), Self::Error>
     where
         W: ?Sized + io::Write,
     {
@@ -245,18 +304,43 @@ impl Serialize for str {
     }
 }
 
+#[derive(Debug, Error)]
+pub enum DeStringError {
+    #[error(transparent)]
+    Conversion(#[from] std::num::TryFromIntError),
+
+    #[error(transparent)]
+    Read(#[from] io::Error),
+
+    #[error(transparent)]
+    Utf8(#[from] std::string::FromUtf8Error),
+}
+
+impl From<DeUsizeError> for DeStringError {
+    fn from(e: DeUsizeError) -> Self {
+        match e {
+            DeUsizeError::Conversion(e) => Self::Conversion(e),
+            DeUsizeError::Read(e) => Self::Read(e),
+        }
+    }
+}
+
 impl Deserialize for String {
-    fn deserialize<R>(src: &mut R, _: &mut ()) -> io::Result<Self>
+    type Error = DeStringError;
+
+    fn deserialize<R>(src: &mut R, _: &mut ()) -> Result<Self, Self::Error>
     where
         R: ?Sized + io::Read,
     {
-        let bytes = Vec::deserialize(src, &mut ())?;
-        Self::from_utf8(bytes).map_err(io::Error::other)
+        let bytes = Vec::deserialize(src, &mut ()).map(Into::into)?;
+        Self::from_utf8(bytes).map_err(DeStringError::Utf8)
     }
 }
 
 impl Serialize for std::ffi::OsStr {
-    fn serialize<W>(&self, dst: &mut W, _: &()) -> io::Result<()>
+    type Error = SerUsizeError;
+
+    fn serialize<W>(&self, dst: &mut W, _: &()) -> Result<(), Self::Error>
     where
         W: ?Sized + io::Write,
     {
@@ -265,7 +349,9 @@ impl Serialize for std::ffi::OsStr {
 }
 
 impl Deserialize for std::ffi::OsString {
-    fn deserialize<R>(src: &mut R, _: &mut ()) -> io::Result<Self>
+    type Error = DeUsizeError;
+
+    fn deserialize<R>(src: &mut R, _: &mut ()) -> Result<Self, Self::Error>
     where
         R: ?Sized + io::Read,
     {
@@ -276,7 +362,9 @@ impl Deserialize for std::ffi::OsString {
 }
 
 impl Serialize for std::ffi::CStr {
-    fn serialize<W>(&self, dst: &mut W, _: &()) -> io::Result<()>
+    type Error = io::Error;
+
+    fn serialize<W>(&self, dst: &mut W, _: &()) -> Result<(), Self::Error>
     where
         W: ?Sized + io::Write,
     {
@@ -285,7 +373,9 @@ impl Serialize for std::ffi::CStr {
 }
 
 impl Deserialize for std::ffi::CString {
-    fn deserialize<R>(src: &mut R, _: &mut ()) -> io::Result<Self>
+    type Error = io::Error;
+
+    fn deserialize<R>(src: &mut R, _: &mut ()) -> Result<Self, Self::Error>
     where
         R: ?Sized + io::Read,
     {
@@ -303,17 +393,23 @@ impl Deserialize for std::ffi::CString {
 }
 
 impl Serialize for std::path::Path {
-    fn serialize<W>(&self, dst: &mut W, _: &()) -> io::Result<()>
+    type Error = SerUsizeError;
+
+    fn serialize<W>(&self, dst: &mut W, _: &()) -> Result<(), Self::Error>
     where
         W: ?Sized + io::Write,
     {
         self.canonicalize()
-            .and_then(|x| x.as_os_str().serialize(dst, &()))
+            .map_err(SerUsizeError::Write)?
+            .as_os_str()
+            .serialize(dst, &())
     }
 }
 
 impl Deserialize for std::path::PathBuf {
-    fn deserialize<R>(src: &mut R, _: &mut ()) -> io::Result<Self>
+    type Error = DeUsizeError;
+
+    fn deserialize<R>(src: &mut R, _: &mut ()) -> Result<Self, Self::Error>
     where
         R: ?Sized + io::Read,
     {
@@ -324,7 +420,9 @@ impl Deserialize for std::path::PathBuf {
 macro_rules! serde_float {
     ($($Type:ident),*) => {$(
         impl Serialize for $Type {
-            fn serialize<W>(&self, dst: &mut W, _: &()) -> io::Result<()>
+            type Error = io::Error;
+
+            fn serialize<W>(&self, dst: &mut W, _: &()) -> Result<(), Self::Error>
             where
                 W: ?Sized + io::Write
             {
@@ -333,7 +431,9 @@ macro_rules! serde_float {
         }
 
         impl Deserialize for $Type {
-            fn deserialize<R>(src: &mut R, _: &mut ()) -> io::Result<Self>
+            type Error = io::Error;
+
+            fn deserialize<R>(src: &mut R, _: &mut ()) -> Result<Self, Self::Error>
             where
                 R: ?Sized + io::Read
             {
@@ -345,79 +445,125 @@ macro_rules! serde_float {
 
 serde_float!(f32, f64);
 
+#[derive(Debug, Error)]
+pub enum SerImageError {
+    #[error(transparent)]
+    Conversion(#[from] std::num::TryFromIntError),
+
+    #[error(transparent)]
+    Write(#[from] io::Error),
+
+    #[error(transparent)]
+    Raylib(#[from] raylib::error::Error),
+}
+
+impl From<SerUsizeError> for SerImageError {
+    fn from(e: SerUsizeError) -> Self {
+        match e {
+            SerUsizeError::Conversion(e) => Self::Conversion(e),
+            SerUsizeError::Write(e) => Self::Write(e),
+        }
+    }
+}
+
 impl Serialize for Image {
-    fn serialize<W>(&self, dst: &mut W, _: &()) -> io::Result<()>
+    type Error = SerImageError;
+
+    fn serialize<W>(&self, dst: &mut W, _: &()) -> Result<(), Self::Error>
     where
         W: ?Sized + io::Write,
     {
-        self.export_image_to_memory(".png")
-            .map_err(io::Error::other)
-            .and_then(|bytes| bytes.serialize(dst, &()))
+        self.export_image_to_memory(".png")?
+            .serialize(dst, &())
+            .map_err(Into::into)
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum DeImageError {
+    #[error(transparent)]
+    Conversion(#[from] std::num::TryFromIntError),
+
+    #[error(transparent)]
+    Read(#[from] io::Error),
+
+    #[error(transparent)]
+    Raylib(#[from] raylib::error::Error),
+}
+
+impl From<DeUsizeError> for DeImageError {
+    fn from(e: DeUsizeError) -> Self {
+        match e {
+            DeUsizeError::Conversion(e) => Self::Conversion(e),
+            DeUsizeError::Read(e) => Self::Read(e),
+        }
     }
 }
 
 impl Deserialize for Image {
-    fn deserialize<R>(src: &mut R, _: &mut ()) -> io::Result<Self>
+    type Error = DeImageError;
+
+    fn deserialize<R>(src: &mut R, _: &mut ()) -> Result<Self, Self::Error>
     where
         Self: Sized,
         R: ?Sized + io::Read,
     {
-        Vec::deserialize(src, &mut ()).and_then(|ref bytes| {
-            Image::load_image_from_mem(".png", bytes).map_err(io::Error::other)
-        })
+        Image::load_image_from_mem(".png", Vec::deserialize(src, &mut ())?.as_slice())
+            .map_err(Into::into)
     }
 }
 
 impl Serialize for Texture2D {
-    fn serialize<W>(&self, dst: &mut W, _: &()) -> io::Result<()>
+    type Error = SerImageError;
+
+    fn serialize<W>(&self, dst: &mut W, _: &()) -> Result<(), Self::Error>
     where
         W: ?Sized + io::Write,
     {
-        self.load_image()
-            .map_err(io::Error::other)
-            .and_then(|img| img.serialize(dst, &()))
+        self.load_image()?.serialize(dst, &())
     }
 }
 
 impl Deserialize<(&mut RaylibHandle, &RaylibThread)> for Texture2D {
+    type Error = DeImageError;
+
     fn deserialize<R>(
         src: &mut R,
         (rl, thread): &mut (&mut RaylibHandle, &RaylibThread),
-    ) -> io::Result<Self>
+    ) -> Result<Self, Self::Error>
     where
         Self: Sized,
         R: ?Sized + io::Read,
     {
-        Image::deserialize(src, &mut ()).and_then(|ref img| {
-            rl.load_texture_from_image(thread, img)
-                .map_err(io::Error::other)
-        })
+        rl.load_texture_from_image(thread, &Image::deserialize(src, &mut ())?)
+            .map_err(Into::into)
     }
 }
 
 impl Serialize for RenderTexture2D {
-    fn serialize<W>(&self, dst: &mut W, _: &()) -> io::Result<()>
+    type Error = SerImageError;
+
+    fn serialize<W>(&self, dst: &mut W, _: &()) -> Result<(), Self::Error>
     where
         W: ?Sized + io::Write,
     {
-        self.load_image()
-            .map_err(io::Error::other)
-            .and_then(|img| img.serialize(dst, &()))
+        self.load_image()?.serialize(dst, &())
     }
 }
 
 impl Deserialize<(&mut RaylibHandle, &RaylibThread)> for RenderTexture2D {
+    type Error = DeImageError;
+
     fn deserialize<R>(
         src: &mut R,
         (rl, thread): &mut (&mut RaylibHandle, &RaylibThread),
-    ) -> io::Result<Self>
+    ) -> Result<Self, Self::Error>
     where
         Self: Sized,
         R: ?Sized + io::Read,
     {
-        Image::deserialize(src, &mut ())
-            .map_err(io::Error::other)
-            .and_then(|ref img| rtex_from_image(rl, thread, img).map_err(io::Error::other))
+        rtex_from_image(rl, thread, &Image::deserialize(src, &mut ())?)
+            .map_err(DeImageError::Raylib)
     }
 }
 
@@ -425,7 +571,9 @@ impl Deserialize<(&mut RaylibHandle, &RaylibThread)> for RenderTexture2D {
 macro_rules! serde_arr_like {
     ($($Struct:ty { $($field:ident),* }),*) => {$(
         impl Serialize for $Struct {
-            fn serialize<W>(&self, dst: &mut W, _: &()) -> std::io::Result<()>
+            type Error = io::Error;
+
+            fn serialize<W>(&self, dst: &mut W, _: &()) -> Result<(), Self::Error>
             where
                 W: ?Sized + std::io::Write,
             {
@@ -434,7 +582,9 @@ macro_rules! serde_arr_like {
         }
 
         impl Deserialize for $Struct {
-            fn deserialize<R>(src: &mut R, _: &mut ()) -> std::io::Result<Self>
+            type Error = io::Error;
+
+            fn deserialize<R>(src: &mut R, _: &mut ()) -> Result<Self, Self::Error>
             where
                 Self: Sized,
                 R: ?Sized + std::io::Read,
@@ -450,7 +600,9 @@ macro_rules! serde_arr_like {
 macro_rules! serde_pod {
     ($($Struct:ty { $($field:ident),* }),*) => {$(
         impl Serialize for $Struct {
-            fn serialize<W>(&self, dst: &mut W, _: &()) -> std::io::Result<()>
+            type Error = std::io::Error;
+
+            fn serialize<W>(&self, dst: &mut W, _: &()) -> Result<(), Self::Error>
             where
                 W: ?Sized + std::io::Write,
             {
@@ -460,7 +612,9 @@ macro_rules! serde_pod {
         }
 
         impl Deserialize for $Struct {
-            fn deserialize<R>(src: &mut R, _: &mut ()) -> std::io::Result<Self>
+            type Error = std::io::Error;
+
+            fn deserialize<R>(src: &mut R, _: &mut ()) -> Result<Self, Self::Error>
             where
                 Self: Sized,
                 R: ?Sized + std::io::Read,
@@ -501,7 +655,9 @@ serde_arr_like!(
 macro_rules! serde_discrim_enum {
     ($($Enum:ty : $Repr:ty { $($Variant:ident),* }),*) => {$(
         impl Serialize for $Enum {
-            fn serialize<W>(&self, dst: &mut W, _: &()) -> std::io::Result<()>
+            type Error = io::Error;
+
+            fn serialize<W>(&self, dst: &mut W, _: &()) -> Result<(), Self::Error>
             where
                 W: ?Sized + std::io::Write,
             {
@@ -510,7 +666,9 @@ macro_rules! serde_discrim_enum {
         }
 
         impl Deserialize for $Enum {
-            fn deserialize<R>(src: &mut R, _: &mut ()) -> std::io::Result<Self>
+            type Error = io::Error;
+
+            fn deserialize<R>(src: &mut R, _: &mut ()) -> Result<Self, Self::Error>
             where
                 Self: Sized,
                 R: ?Sized + std::io::Read,

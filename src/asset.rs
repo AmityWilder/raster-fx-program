@@ -1,8 +1,11 @@
 use crate::{
     command::error::OpenFileError,
     error::IndexError,
-    layer::{LoadError, SaveError, rtex_from_image},
-    serde::{Deserialize, DeserializeSlice, Serialize, SerializeSlice},
+    layer::rtex_from_image,
+    serde::{
+        DeStringError, DeUsizeError, Deserialize, DeserializeSlice, SerUsizeError, Serialize,
+        SerializeSlice,
+    },
 };
 use clap::Args;
 use raylib::prelude::*;
@@ -46,29 +49,39 @@ impl FromStr for AssetPos {
 }
 
 impl Serialize for AssetPos {
-    fn serialize<W>(&self, dst: &mut W, _: &()) -> std::io::Result<()>
+    type Error = SerUsizeError;
+
+    fn serialize<W>(&self, dst: &mut W, _: &()) -> Result<(), Self::Error>
     where
         W: ?Sized + std::io::Write,
     {
         match self {
-            AssetPos::Basic => b'*'.serialize(dst, &()),
-            AssetPos::Index(x) => b'#'
-                .serialize(dst, &())
-                .and_then(|()| x.serialize(dst, &())),
+            AssetPos::Basic => {
+                b'*'.serialize(dst, &())?;
+            }
+            AssetPos::Index(x) => {
+                b'#'.serialize(dst, &())?;
+                x.serialize(dst, &())?;
+            }
         }
+        Ok(())
     }
 }
 
 impl Deserialize for AssetPos {
-    fn deserialize<R>(src: &mut R, _: &mut ()) -> std::io::Result<Self>
+    type Error = DeUsizeError;
+
+    fn deserialize<R>(src: &mut R, _: &mut ()) -> Result<Self, Self::Error>
     where
         Self: Sized,
         R: ?Sized + std::io::Read,
     {
         match u8::deserialize(src, &mut ())? {
             b'*' => Ok(Self::Basic),
-            b'#' => Deserialize::deserialize(src, &mut ()).map(Self::Index),
-            _ => Err(std::io::Error::other(OpenFileError::Invalid)),
+            b'#' => usize::deserialize(src, &mut ()).map(Self::Index),
+            _ => Err(DeUsizeError::Read(std::io::Error::other(
+                OpenFileError::Invalid,
+            ))),
         }
     }
 }
@@ -122,33 +135,61 @@ pub enum RasterSrc {
 }
 
 impl Serialize for RasterSrc {
-    fn serialize<W>(&self, dst: &mut W, _: &()) -> std::io::Result<()>
+    type Error = SerUsizeError;
+
+    fn serialize<W>(&self, dst: &mut W, _: &()) -> Result<(), Self::Error>
     where
         W: ?Sized + std::io::Write,
     {
         match self {
-            Self::File(path) => b'f'
-                .serialize(dst, &())
-                .and_then(|()| path.serialize(dst, &())),
-            Self::Layer(()) => b'l'.serialize(dst, &()).and_then(|()| todo!()),
+            Self::File(path) => {
+                b'f'.serialize(dst, &())?;
+                path.serialize(dst, &())?;
+            }
+            Self::Layer(()) => {
+                b'l'.serialize(dst, &())?;
+                todo!("layer assets don't exist yet")
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum DeEnumError {
+    #[error(transparent)]
+    Conversion(#[from] std::num::TryFromIntError),
+
+    #[error(transparent)]
+    Read(#[from] std::io::Error),
+
+    #[error("unknown variant: {0} ({0:#X})")]
+    UnknownVariant(u8),
+}
+
+impl From<DeUsizeError> for DeEnumError {
+    fn from(e: DeUsizeError) -> Self {
+        match e {
+            DeUsizeError::Conversion(e) => Self::Conversion(e),
+            DeUsizeError::Read(e) => Self::Read(e),
         }
     }
 }
 
 impl Deserialize for RasterSrc {
-    fn deserialize<R>(src: &mut R, _: &mut ()) -> std::io::Result<Self>
+    type Error = DeEnumError;
+
+    fn deserialize<R>(src: &mut R, _: &mut ()) -> Result<Self, Self::Error>
     where
         Self: Sized,
         R: ?Sized + std::io::Read,
     {
         match u8::deserialize(src, &mut ())? {
-            b'f' => PathBuf::deserialize(src, &mut ()).map(Self::File),
-
-            b'l' => todo!(),
-
-            x => Err(std::io::Error::other(format!(
-                "unknown variant: {x} ({x:#X})"
-            ))),
+            b'f' => PathBuf::deserialize(src, &mut ())
+                .map(Self::File)
+                .map_err(Into::into),
+            b'l' => todo!("layer assets don't exist yet"),
+            x => Err(DeEnumError::UnknownVariant(x)),
         }
     }
 }
@@ -189,17 +230,14 @@ pub struct ShaderSrc {
 }
 
 impl Serialize for ShaderSrc {
-    fn serialize<W>(&self, dst: &mut W, _: &()) -> std::io::Result<()>
+    type Error = SerUsizeError;
+
+    fn serialize<W>(&self, dst: &mut W, _: &()) -> Result<(), Self::Error>
     where
         W: ?Sized + std::io::Write,
     {
-        match (self.vs_path.is_some(), self.fs_path.is_some()) {
-            (true, true) => b't',
-            (true, false) => b'v',
-            (false, true) => b'f',
-            (false, false) => b's',
-        }
-        .serialize(dst, &())?;
+        let flags = ((self.vs_path.is_some() as u8) << 1) | (self.fs_path.is_some() as u8);
+        flags.serialize(dst, &())?;
         if let Some(path) = &self.vs_path {
             path.serialize(dst, &())?;
         }
@@ -211,23 +249,18 @@ impl Serialize for ShaderSrc {
 }
 
 impl Deserialize for ShaderSrc {
-    fn deserialize<R>(src: &mut R, _: &mut ()) -> std::io::Result<Self>
+    type Error = DeEnumError;
+
+    fn deserialize<R>(src: &mut R, _: &mut ()) -> Result<Self, Self::Error>
     where
         Self: Sized,
         R: ?Sized + std::io::Read,
     {
-        let (has_vs, has_fs) = match u8::deserialize(src, &mut ())? {
-            b't' => (true, true),
-            b'v' => (true, false),
-            b'f' => (false, true),
-            b's' => (false, false),
-
-            x => {
-                return Err(std::io::Error::other(format!(
-                    "unknown variant: {x} ({x:#X})"
-                )));
-            }
-        };
+        let flags = u8::deserialize(src, &mut ())?;
+        if (flags & !3) != 0 {
+            return Err(DeEnumError::UnknownVariant(flags));
+        }
+        let (has_vs, has_fs) = ((flags & 2) != 0, (flags & 1) != 0);
         Ok(Self {
             vs_path: has_vs
                 .then(|| PathBuf::deserialize(src, &mut ()))
@@ -275,27 +308,33 @@ enum AssetContent {
 }
 
 impl Serialize for AssetContent {
-    fn serialize<W>(&self, dst: &mut W, _: &()) -> std::io::Result<()>
+    type Error = SerUsizeError;
+
+    fn serialize<W>(&self, dst: &mut W, _: &()) -> Result<(), Self::Error>
     where
         W: ?Sized + std::io::Write,
     {
         match self {
-            Self::Raster { src, rtex: _ } => b'r'
-                .serialize(dst, &())
-                .and_then(|()| src.serialize(dst, &())),
-
-            Self::Shader { src, shader: _ } => b's'
-                .serialize(dst, &())
-                .and_then(|()| src.serialize(dst, &())),
+            Self::Raster { src, rtex: _ } => {
+                b'r'.serialize(dst, &())?;
+                src.serialize(dst, &())?;
+            }
+            Self::Shader { src, shader: _ } => {
+                b's'.serialize(dst, &())?;
+                src.serialize(dst, &())?;
+            }
         }
+        Ok(())
     }
 }
 
 impl Deserialize<(&mut RaylibHandle, &RaylibThread)> for AssetContent {
+    type Error = DeEnumError;
+
     fn deserialize<R>(
         src: &mut R,
         (rl, thread): &mut (&mut RaylibHandle, &RaylibThread),
-    ) -> std::io::Result<Self>
+    ) -> Result<Self, Self::Error>
     where
         Self: Sized,
         R: ?Sized + std::io::Read,
@@ -321,9 +360,7 @@ impl Deserialize<(&mut RaylibHandle, &RaylibThread)> for AssetContent {
                 })
             }
 
-            x => Err(std::io::Error::other(format!(
-                "unknown variant: {x} ({x:#X})"
-            ))),
+            x => Err(DeEnumError::UnknownVariant(x)),
         }
     }
 }
@@ -341,7 +378,9 @@ pub struct Asset {
 }
 
 impl Serialize for Asset {
-    fn serialize<W>(&self, dst: &mut W, _: &()) -> std::io::Result<()>
+    type Error = SerUsizeError;
+
+    fn serialize<W>(&self, dst: &mut W, _: &()) -> Result<(), Self::Error>
     where
         W: ?Sized + std::io::Write,
     {
@@ -352,11 +391,57 @@ impl Serialize for Asset {
     }
 }
 
+#[derive(Debug, Error)]
+pub enum DeStrEnumError {
+    #[error(transparent)]
+    Conversion(#[from] std::num::TryFromIntError),
+
+    #[error(transparent)]
+    Read(#[from] std::io::Error),
+
+    #[error(transparent)]
+    Utf8(#[from] std::string::FromUtf8Error),
+
+    #[error("unknown variant: {0} ({0:#X})")]
+    UnknownVariant(u8),
+}
+
+impl From<DeUsizeError> for DeStrEnumError {
+    fn from(e: DeUsizeError) -> Self {
+        match e {
+            DeUsizeError::Conversion(e) => Self::Conversion(e),
+            DeUsizeError::Read(e) => Self::Read(e),
+        }
+    }
+}
+
+impl From<DeStringError> for DeStrEnumError {
+    fn from(e: DeStringError) -> Self {
+        match e {
+            DeStringError::Conversion(e) => Self::Conversion(e),
+            DeStringError::Read(e) => Self::Read(e),
+            DeStringError::Utf8(e) => Self::Utf8(e),
+        }
+    }
+}
+
+impl From<DeEnumError> for DeStrEnumError {
+    fn from(e: DeEnumError) -> Self {
+        match e {
+            DeEnumError::Conversion(e) => Self::Conversion(e),
+            DeEnumError::Read(e) => Self::Read(e),
+            DeEnumError::UnknownVariant(x) => Self::UnknownVariant(x),
+        }
+    }
+}
+
 impl Deserialize<(&mut RaylibHandle, &RaylibThread)> for Asset {
+    type Error = DeStrEnumError;
+
     fn deserialize<R>(
         src: &mut R,
         ctx: &mut (&mut RaylibHandle, &RaylibThread),
-    ) -> std::io::Result<Self>
+    ) -> Result<Self, Self::Error>
     where
         Self: Sized,
         R: ?Sized + std::io::Read,
@@ -440,20 +525,25 @@ pub struct Assets {
 }
 
 impl Serialize for Assets {
-    fn serialize<W>(&self, dst: &mut W, _: &()) -> std::io::Result<()>
+    type Error = SerUsizeError;
+
+    fn serialize<W>(&self, dst: &mut W, _: &()) -> Result<(), Self::Error>
     where
         W: ?Sized + std::io::Write,
     {
         let Self { list } = self;
-        list.serialize_slice(dst, &())
+        list.serialize_slice(dst, &())?;
+        Ok(())
     }
 }
 
 impl Deserialize<(&mut RaylibHandle, &RaylibThread)> for Assets {
+    type Error = DeStrEnumError;
+
     fn deserialize<R>(
         src: &mut R,
         ctx: &mut (&mut RaylibHandle, &RaylibThread),
-    ) -> std::io::Result<Self>
+    ) -> Result<Self, Self::Error>
     where
         Self: Sized,
         R: ?Sized + std::io::Read,

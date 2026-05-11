@@ -1,11 +1,14 @@
 use crate::{
-    asset::{Asset, AssetPos, AssetRef, Assets, SelectAssetError},
+    asset::{Asset, AssetPos, AssetRef, Assets, DeStrEnumError, SelectAssetError},
     command::error::{
         LinkError, NewLayerError, OpenFileError, RemoveLayerError, ReorderLayersError,
     },
     error::IndexError,
     rlgl::*,
-    serde::{Deserialize, DeserializeSlice, Serialize, SerializeSlice},
+    serde::{
+        DeImageError, DeStringError, DeUsizeError, Deserialize, DeserializeSlice, SerImageError,
+        SerUsizeError, Serialize, SerializeSlice,
+    },
     serde_pod,
 };
 use raylib::prelude::*;
@@ -349,7 +352,9 @@ pub struct Effect {
 }
 
 impl Serialize<&Assets> for Effect {
-    fn serialize<W>(&self, dst: &mut W, assets: &&Assets) -> std::io::Result<()>
+    type Error = SerUsizeError;
+
+    fn serialize<W>(&self, dst: &mut W, assets: &&Assets) -> Result<(), Self::Error>
     where
         W: ?Sized + std::io::Write,
     {
@@ -361,24 +366,44 @@ impl Serialize<&Assets> for Effect {
     }
 }
 
+#[derive(Debug, Error)]
+pub enum DeEffectError {
+    #[error(transparent)]
+    Conversion(#[from] std::num::TryFromIntError),
+
+    #[error(transparent)]
+    Read(#[from] std::io::Error),
+
+    #[error(transparent)]
+    SelectAsset(#[from] SelectAssetError),
+
+    #[error("asset mismatch: expecing shader, found raster")]
+    AssetMismatch,
+}
+
+impl From<DeUsizeError> for DeEffectError {
+    fn from(e: DeUsizeError) -> Self {
+        match e {
+            DeUsizeError::Conversion(e) => Self::Conversion(e),
+            DeUsizeError::Read(e) => Self::Read(e),
+        }
+    }
+}
+
 impl Deserialize<&Assets> for Effect {
-    fn deserialize<R>(src: &mut R, assets: &mut &Assets) -> std::io::Result<Self>
+    type Error = DeEffectError;
+
+    fn deserialize<R>(src: &mut R, assets: &mut &Assets) -> Result<Self, Self::Error>
     where
         Self: Sized,
         R: ?Sized + std::io::Read,
     {
         let asset_pos = AssetPos::deserialize(src, &mut ())?;
-        match assets
-            .get(asset_pos)
-            .map_err(std::io::Error::other)?
-            .link_ref()
-        {
+        match assets.get(asset_pos)?.link_ref() {
             AssetRef::Shader(shader) => Ok(Effect {
                 asset: Rc::downgrade(shader),
             }),
-            AssetRef::Raster(_) => Err(std::io::Error::other(
-                "asset mismatch: expecing shader, found raster",
-            )),
+            AssetRef::Raster(_) => Err(DeEffectError::AssetMismatch),
         }
     }
 }
@@ -511,68 +536,67 @@ enum LayerContent {
 }
 
 impl Serialize<&Assets> for LayerContent {
-    fn serialize<W>(&self, dst: &mut W, assets: &&Assets) -> std::io::Result<()>
+    type Error = SerImageError;
+
+    fn serialize<W>(&self, dst: &mut W, assets: &&Assets) -> Result<(), Self::Error>
     where
         W: ?Sized + std::io::Write,
     {
         match self {
-            Self::Unique { buffer } => b'u'
-                .serialize(dst, &())
-                .and_then(|()| buffer.serialize(dst, &())),
+            Self::Unique { buffer } => {
+                b'u'.serialize(dst, &())?;
+                buffer.serialize(dst, &())?;
+            }
 
-            Self::Asset { buffer } => b'a'.serialize(dst, &()).and_then(|()| {
+            Self::Asset { buffer } => {
+                b'a'.serialize(dst, &())?;
                 assets
                     .raster_pos(buffer)
                     .unwrap_or_default()
-                    .serialize(dst, &())
-            }),
+                    .serialize(dst, &())?;
+            }
 
             Self::Group {
                 buffer: _, // TODO: maybe save the width/height?
                 children,
-            } => b'g'
-                .serialize(dst, &())
-                .and_then(|()| children.serialize_slice(dst, assets)),
+            } => {
+                b'g'.serialize(dst, &())?;
+                children.serialize_slice(dst, assets)?;
+            }
         }
+        Ok(())
     }
 }
 
 impl Deserialize<(&mut RaylibHandle, &RaylibThread, &Assets)> for LayerContent {
+    type Error = DeLayerError;
+
     fn deserialize<R>(
         src: &mut R,
         (rl, thread, assets): &mut (&mut RaylibHandle, &RaylibThread, &Assets),
-    ) -> std::io::Result<Self>
+    ) -> Result<Self, Self::Error>
     where
         Self: Sized,
         R: ?Sized + std::io::Read,
     {
         match u8::deserialize(src, &mut ())? {
             b'u' => RenderTexture2D::deserialize(src, &mut (&mut **rl, &**thread))
-                .map(|buffer| Self::Unique { buffer }),
+                .map(|buffer| Self::Unique { buffer })
+                .map_err(Into::into),
 
-            b'a' => match assets
-                .get(AssetPos::deserialize(src, &mut ())?)
-                .map_err(std::io::Error::other)?
-                .link_ref()
-            {
+            b'a' => match assets.get(AssetPos::deserialize(src, &mut ())?)?.link_ref() {
                 AssetRef::Raster(raster) => Ok(Self::Asset {
                     buffer: raster.clone(),
                 }),
-                AssetRef::Shader(_) => Err(std::io::Error::other(
-                    "asset mismatch: expecing raster, found shader",
-                )),
+                AssetRef::Shader(_) => Err(DeLayerError::RasterMismatch),
             },
 
             b'g' => Ok(Self::Group {
-                buffer: rl
-                    .load_render_texture(thread, 0, 0)
-                    .map_err(std::io::Error::other)?,
+                buffer: rl.load_render_texture(thread, 0, 0)?,
                 children: Vec::deserialize_slice(src, &mut (&mut **rl, &**thread, &**assets))?,
             }),
 
-            x => Err(std::io::Error::other(format!(
-                "unknown variant: {x} ({x:#X})"
-            ))),
+            x => Err(DeLayerError::UnknownVariant(x)),
         }
     }
 }
@@ -613,7 +637,9 @@ pub struct Layer {
 }
 
 impl Serialize<&Assets> for Layer {
-    fn serialize<W>(&self, dst: &mut W, assets: &&Assets) -> std::io::Result<()>
+    type Error = SerImageError;
+
+    fn serialize<W>(&self, dst: &mut W, assets: &&Assets) -> Result<(), Self::Error>
     where
         W: ?Sized + std::io::Write,
     {
@@ -634,11 +660,91 @@ impl Serialize<&Assets> for Layer {
     }
 }
 
+#[derive(Debug, Error)]
+pub enum DeLayerError {
+    #[error(transparent)]
+    Conversion(#[from] std::num::TryFromIntError),
+
+    #[error(transparent)]
+    Read(#[from] std::io::Error),
+
+    #[error(transparent)]
+    Utf8(#[from] std::string::FromUtf8Error),
+
+    #[error("unknown variant: {0} ({0:#X})")]
+    UnknownVariant(u8),
+
+    #[error(transparent)]
+    Raylib(#[from] raylib::error::Error),
+
+    #[error(transparent)]
+    SelectAsset(#[from] SelectAssetError),
+
+    #[error("asset mismatch: expecing raster, found shader")]
+    RasterMismatch,
+
+    #[error("asset mismatch: expecing shader, found raster")]
+    EffectMismatch,
+}
+
+impl From<DeUsizeError> for DeLayerError {
+    fn from(e: DeUsizeError) -> Self {
+        match e {
+            DeUsizeError::Conversion(e) => Self::Conversion(e),
+            DeUsizeError::Read(e) => Self::Read(e),
+        }
+    }
+}
+
+impl From<DeStringError> for DeLayerError {
+    fn from(e: DeStringError) -> Self {
+        match e {
+            DeStringError::Conversion(e) => Self::Conversion(e),
+            DeStringError::Read(e) => Self::Read(e),
+            DeStringError::Utf8(e) => Self::Utf8(e),
+        }
+    }
+}
+
+impl From<DeStrEnumError> for DeLayerError {
+    fn from(e: DeStrEnumError) -> Self {
+        match e {
+            DeStrEnumError::Conversion(e) => Self::Conversion(e),
+            DeStrEnumError::Read(e) => Self::Read(e),
+            DeStrEnumError::Utf8(e) => Self::Utf8(e),
+            DeStrEnumError::UnknownVariant(x) => Self::UnknownVariant(x),
+        }
+    }
+}
+
+impl From<DeEffectError> for DeLayerError {
+    fn from(e: DeEffectError) -> Self {
+        match e {
+            DeEffectError::Conversion(e) => Self::Conversion(e),
+            DeEffectError::Read(e) => Self::Read(e),
+            DeEffectError::SelectAsset(e) => Self::SelectAsset(e),
+            DeEffectError::AssetMismatch => Self::EffectMismatch,
+        }
+    }
+}
+
+impl From<DeImageError> for DeLayerError {
+    fn from(e: DeImageError) -> Self {
+        match e {
+            DeImageError::Conversion(e) => Self::Conversion(e),
+            DeImageError::Read(e) => Self::Read(e),
+            DeImageError::Raylib(e) => Self::Raylib(e),
+        }
+    }
+}
+
 impl Deserialize<(&mut RaylibHandle, &RaylibThread, &Assets)> for Layer {
+    type Error = DeLayerError;
+
     fn deserialize<R>(
         src: &mut R,
         (rl, thread, assets): &mut (&mut RaylibHandle, &RaylibThread, &Assets),
-    ) -> std::io::Result<Self>
+    ) -> Result<Self, Self::Error>
     where
         Self: Sized,
         R: ?Sized + std::io::Read,
@@ -796,10 +902,7 @@ pub struct Layers {
 #[derive(Debug, Error)]
 pub enum SaveError {
     #[error(transparent)]
-    Io(#[from] std::io::Error),
-
-    #[error(transparent)]
-    Raylib(#[from] raylib::error::Error),
+    Serialization(#[from] SerImageError),
 
     #[error(
         "cannot save this file; files are stored with 64-bit integers for standardization and your system has {} bits, which exceeds that. \
@@ -816,45 +919,35 @@ pub enum LoadError {
     OpenFile(#[from] OpenFileError),
 
     #[error(transparent)]
-    Io(#[from] std::io::Error),
-
-    #[error(transparent)]
-    Raylib(#[from] raylib::error::Error),
-
-    #[error(transparent)]
-    FromUtf8(#[from] FromUtf8Error),
+    Deserialize(#[from] DeLayerError),
 
     #[error(
         "save file appears to have been created on a system with a larger bit width and exceeded this system's memory limit without exceeding the limit on that system"
     )]
     Oversize(#[from] std::num::TryFromIntError),
-
-    #[error("file is an incompatible format or corrupt")]
-    Invalid,
-
-    #[error("missing asset")]
-    SelectAsset(#[from] SelectAssetError),
-
-    #[error("asset is of wrong type")]
-    AssetMismatch,
 }
 
 impl Serialize<&Assets> for Layers {
-    fn serialize<W>(&self, dst: &mut W, assets: &&Assets) -> std::io::Result<()>
+    type Error = SerImageError;
+
+    fn serialize<W>(&self, dst: &mut W, assets: &&Assets) -> Result<(), Self::Error>
     where
         W: ?Sized + std::io::Write,
     {
         let Self { list, curr } = self;
-        list.serialize_slice(dst, assets)
-            .and_then(|()| curr.serialize(dst, &()))
+        list.serialize_slice(dst, assets)?;
+        curr.serialize(dst, &())?;
+        Ok(())
     }
 }
 
 impl Deserialize<(&mut RaylibHandle, &RaylibThread, &Assets)> for Layers {
+    type Error = DeLayerError;
+
     fn deserialize<R>(
         src: &mut R,
         ctx: &mut (&mut RaylibHandle, &RaylibThread, &Assets),
-    ) -> std::io::Result<Self>
+    ) -> Result<Self, Self::Error>
     where
         Self: Sized,
         R: ?Sized + std::io::Read,

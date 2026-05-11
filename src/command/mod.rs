@@ -1,6 +1,6 @@
 use crate::{
     asset::{Asset, AssetPos, Assets, RasterSrc, ShaderSrc},
-    layer::{Layer, LayerPos, Layers, SaveError},
+    layer::{Layer, LayerPos, Layers, LoadError, SaveError},
     serde::{Deserialize, Serialize},
 };
 use clap::Parser;
@@ -237,12 +237,15 @@ impl Command {
                     if let Some(ext) = path.extension()
                         && ext.eq_ignore_ascii_case("amyfx")
                     {
-                        let contents = std::fs::read(path).map_err(SaveError::Io)?;
+                        let contents = std::fs::read(path)
+                            .map_err(Into::into)
+                            .map_err(LoadError::Deserialize)?;
                         let mut data = contents.as_slice();
                         *assets = Assets::deserialize(&mut data, &mut (rl, thread))
-                            .map_err(SaveError::Io)?;
+                            .map_err(Into::into)
+                            .map_err(LoadError::Deserialize)?;
                         *layers = Layers::deserialize(&mut data, &mut (rl, thread, assets))
-                            .map_err(SaveError::Io)?;
+                            .map_err(LoadError::Deserialize)?;
                     } else {
                         let asset = assets
                             .push(Asset::load_raster(
@@ -298,12 +301,14 @@ impl Command {
                 let mut contents = Vec::new();
                 assets
                     .serialize(&mut contents, &())
-                    .map_err(SaveError::Io)?;
+                    .map_err(Into::into)
+                    .map_err(SaveError::Serialization)?;
                 layers
                     .serialize(&mut contents, &&*assets)
-                    .map_err(SaveError::Io)?;
+                    .map_err(SaveError::Serialization)?;
                 std::fs::write(std::path::Path::new("session.amyfx"), &contents) // TODO: allow user to set this
-                    .map_err(SaveError::Io)?;
+                    .map_err(Into::into)
+                    .map_err(SaveError::Serialization)?;
                 return Ok(ControlFlow::Break(()));
             }
         }
