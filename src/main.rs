@@ -21,6 +21,7 @@ use crate::{
     asset::Assets,
     command::{Command, error::CommandError},
     layer::Layers,
+    message::print_err_recursive,
 };
 use clap::Parser;
 use raylib::prelude::*;
@@ -36,21 +37,9 @@ mod asset;
 mod command;
 mod error;
 mod layer;
+mod message;
 pub mod rlgl;
 mod serde;
-
-pub fn print_err_recursive(mut e: &dyn std::error::Error) {
-    loop {
-        eprint!("{e}");
-        if let Some(src) = e.source() {
-            eprint!(": ");
-            e = src;
-        } else {
-            break;
-        }
-    }
-    eprintln!();
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct ArgsIter<'a> {
@@ -81,6 +70,10 @@ impl<'a> Iterator for ArgsIter<'a> {
 
 impl std::iter::FusedIterator for ArgsIter<'_> {}
 
+#[derive(Debug, thiserror::Error)]
+#[error("invalid input")]
+struct InvalidInputError(#[from] std::io::Error);
+
 fn main() {
     let stdin_channel = {
         let (tx, rx) = mpsc::channel::<String>();
@@ -90,7 +83,7 @@ fn main() {
                 loop {
                     let mut buffer = String::new();
                     if let Err(e) = stdin().read_line(&mut buffer) {
-                        eprintln!("\x1b[1;91invalid input:\x1b[0m {e}");
+                        print_err_recursive(&InvalidInputError(e));
                         continue;
                     }
                     buffer.truncate(buffer.trim_end().len());
@@ -102,14 +95,21 @@ fn main() {
             .expect("failed to spawn input thread");
         rx
     };
-    let (mut rl, thread) = init().title("Amity FX").size(1280, 720).resizable().build();
-    rl.set_trace_log(TraceLogLevel::LOG_ERROR);
+    let (mut rl, thread) = init()
+        .log_level(TraceLogLevel::LOG_WARNING)
+        .title("Amity FX")
+        .size(1280, 720)
+        .resizable()
+        .build();
 
     rl.set_target_fps(30);
 
     let mut history: VecDeque<String> = VecDeque::new();
     let mut assets = Assets::new();
     let mut layers = Layers::new();
+    let mut save_file = None;
+    // SAFETY: these literals are not 0
+    let mut canvas_size = [1024, 720].map(|n| unsafe { std::num::NonZeroU32::new_unchecked(n) });
 
     'mainloop: while !rl.window_should_close() {
         match stdin_channel.try_recv() {
@@ -118,8 +118,15 @@ fn main() {
                     match Command::try_parse_from(std::iter::once("").chain(ArgsIter::new(input)))
                         .map_err(CommandError::Parse)
                         .and_then(|cmd| {
-                            cmd.run(&mut rl, &thread, &mut assets, &mut layers)
-                                .map_err(CommandError::Run)
+                            cmd.run(
+                                &mut rl,
+                                &thread,
+                                &mut assets,
+                                &mut layers,
+                                &mut save_file,
+                                &mut canvas_size,
+                            )
+                            .map_err(CommandError::Run)
                         }) {
                         Ok(ControlFlow::Continue(())) => {}
 
@@ -135,11 +142,10 @@ fn main() {
                                 }
 
                                 CommandError::Parse(e) => {
-                                    println!("\x1b[1;91mparse error:\x1b[0m {}", e.render());
+                                    println!("\x1b[1;91merror:\x1b[0m {}", e.render());
                                 }
 
                                 _ => {
-                                    eprint!("\x1b[1;91merror:\x1b[0m ");
                                     print_err_recursive(&e);
                                 }
                             }
@@ -158,10 +164,7 @@ fn main() {
         for layer in layers.iter_mut() {
             if let Err(e) = layer.prep_buffer_recursively(&mut rl, &thread) {
                 #[cfg(debug_assertions)]
-                {
-                    eprint!("\x1b[1;91mdraw error:\x1b[0m ");
-                    print_err_recursive(&e);
-                }
+                print_err_recursive(&e);
             }
         }
         let mut d = rl.begin_drawing(&thread);
@@ -169,10 +172,7 @@ fn main() {
         for layer in layers.iter_mut() {
             if let Err(e) = layer.draw_buffer(&mut d, Matrix::identity()) {
                 #[cfg(debug_assertions)]
-                {
-                    eprint!("\x1b[1;91mdraw error:\x1b[0m ");
-                    print_err_recursive(&e);
-                }
+                print_err_recursive(&e);
             }
         }
     }

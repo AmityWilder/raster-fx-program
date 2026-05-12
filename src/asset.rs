@@ -27,7 +27,7 @@ impl From<usize> for AssetPos {
 
 #[derive(Debug, Error)]
 pub enum ParseAssetPosError {
-    #[error("unrecognized position format: {}", .0)]
+    #[error("unrecognized position format: \"{}\"", .0)]
     Unknown(String),
 
     #[error("failed to parse position index")]

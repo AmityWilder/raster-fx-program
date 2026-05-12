@@ -1,11 +1,12 @@
 use crate::{
     asset::{Asset, AssetPos, Assets, RasterSrc, ShaderSrc},
     layer::{Layer, LayerPos, Layers, LoadError, SaveError},
-    serde::{Deserialize, Serialize},
+    message::{print_success_recursive, print_warning_recursive},
+    serde::{Deserialize, DeserializeArr, Serialize},
 };
 use clap::Parser;
 use raylib::prelude::*;
-use std::{ops::ControlFlow, path::PathBuf};
+use std::{io::Write, ops::ControlFlow, path::PathBuf};
 
 pub mod error;
 use error::*;
@@ -51,7 +52,7 @@ pub enum Command {
         name: String,
 
         /// Where to put the layer
-        #[arg(default_value = "*")]
+        #[arg(default_value = "]")]
         at: LayerPos,
     },
 
@@ -129,9 +130,17 @@ pub enum Command {
         path: PathBuf,
     },
 
-    /// Close the application
+    /// Save and close the application
     #[command(visible_alias = "q")]
     Quit,
+
+    /// Save and close the application, overwriting the save file without warning
+    #[command(visible_alias = "wq")]
+    SaveAndQuit,
+
+    /// Close the application without saving
+    #[command(visible_alias = "q!")]
+    ForceQuit,
 }
 
 impl Command {
@@ -141,6 +150,8 @@ impl Command {
         thread: &RaylibThread,
         assets: &mut Assets,
         layers: &mut Layers,
+        file: &mut Option<PathBuf>,
+        canvas_size: &mut [std::num::NonZeroU32; 2],
     ) -> Result<ControlFlow<()>, RunCommandError> {
         match self {
             Self::List {
@@ -186,7 +197,8 @@ impl Command {
                 name,
                 is_group,
             } => {
-                rl.load_render_texture(thread, 0, 0)
+                let [w, h] = *canvas_size;
+                rl.load_render_texture(thread, w.get(), h.get())
                     .map_err(NewLayerError::Raylib)
                     .and_then(|buffer| {
                         layers.insert(
@@ -206,16 +218,16 @@ impl Command {
                 let asset = assets.get_mut(from).map_err(LinkError::from)?;
                 let layer = layers.get_mut(to).map_err(LinkError::from)?;
                 layer.link(asset)?;
-                println!(
-                    "\x1b[96mlinked asset\x1b[0m \"{}\" \x1b[96mto layer\x1b[0m \"{}\"",
+                print_success_recursive(&format!(
+                    "linked asset \"{}\" to layer \"{}\"",
                     asset.name, layer.name
-                );
+                ));
             }
 
             Self::Reload { what } => {
                 let asset = assets.get_mut(what).map_err(ReloadAssetError::from)?;
                 asset.reload(rl, thread)?;
-                println!("\x1b[96masset \"{}\" reloaded\x1b[0m", asset.name);
+                print_success_recursive(&format!("asset \"{}\" reloaded", asset.name));
             }
 
             Self::Reorder { from, to } => layers.reorder(from, to)?,
@@ -233,11 +245,21 @@ impl Command {
                         .map_err(Into::into)
                         .map_err(LoadError::Deserialize)?;
                     let mut data = contents.as_slice();
+                    *canvas_size = DeserializeArr::deserialize_arr(&mut data, &mut ())
+                        .map_err(Into::into)
+                        .map_err(LoadError::Deserialize)?;
                     *assets = Assets::deserialize(&mut data, &mut (rl, thread))
                         .map_err(Into::into)
                         .map_err(LoadError::Deserialize)?;
                     *layers = Layers::deserialize(&mut data, &mut (rl, thread, assets))
                         .map_err(LoadError::Deserialize)?;
+                    print_success_recursive(&format!("amyfx loaded: \"{}\"", path.display()));
+                    *file = Some(
+                        paths
+                            .into_iter()
+                            .next()
+                            .expect("should be guaranteed by branch"),
+                    );
                 } else if let [path] = paths.as_slice()
                     && let Some(ext) = path.extension()
                     && ext.eq_ignore_ascii_case("png")
@@ -252,11 +274,14 @@ impl Command {
                             })
                             .unwrap_or_else(|| format!("asset {}", assets.len())),
                             RasterSrc::File(
-                                paths.into_iter().next().expect("guaranteed by branch"),
+                                paths
+                                    .into_iter()
+                                    .next()
+                                    .expect("should be guaranteed by branch"),
                             ),
                         )?)
                         .map_err(OpenFileError::NoMemory)?;
-                    println!("\x1b[96mraster loaded:\x1b[0m \"{}\"", asset.name);
+                    print_success_recursive(&format!("raster loaded: \"{}\"", asset.name));
                 } else {
                     let mut vs_path = None;
                     let mut fs_path = None;
@@ -264,23 +289,23 @@ impl Command {
                         let ext = path.extension().unwrap_or_default();
                         if ext.eq_ignore_ascii_case("vs") || ext.eq_ignore_ascii_case("vert") {
                             if vs_path.is_some() {
-                                println!(
-                                    "\x1b[1;95mwarning:\x1b[0m multiple vertex shaders, using the last one"
+                                print_warning_recursive(
+                                    &"multiple vertex shaders, using the last one",
                                 );
                             }
                             vs_path = Some(path);
                         } else if ext.eq_ignore_ascii_case("fs") || ext.eq_ignore_ascii_case("frag")
                         {
                             if fs_path.is_some() {
-                                println!(
-                                    "\x1b[1;95mwarning:\x1b[0m multiple fragment shaders, using the last one"
+                                print_warning_recursive(
+                                    &"multiple fragment shaders, using the last one",
                                 );
                             }
                             fs_path = Some(path);
                         }
                     }
                     if fs_path.is_none() && vs_path.is_none() {
-                        println!("\x1b[1;95mwarning:\x1b[0m no files to open");
+                        print_warning_recursive(&"no files to open");
                     } else {
                         let asset = assets
                             .push(Asset::load_shader(
@@ -305,16 +330,16 @@ impl Command {
                                 ShaderSrc { fs_path, vs_path },
                             )?)
                             .map_err(OpenFileError::NoMemory)?;
-                        println!("\x1b[96mshader loaded:\x1b[0m \"{}\"", asset.name);
+                        print_success_recursive(&format!("shader loaded: \"{}\"", asset.name));
                     }
                 }
             }
 
             Self::Export { path: _ } => {
-                println!("\x1b[1;95mnot yet implemented\x1b[0m");
+                print_warning_recursive(&"not yet implemented");
             }
 
-            Self::Quit {} => {
+            Self::Quit | Self::SaveAndQuit => {
                 let mut contents = Vec::new();
                 assets
                     .serialize(&mut contents, &())
@@ -323,9 +348,26 @@ impl Command {
                 layers
                     .serialize(&mut contents, &&*assets)
                     .map_err(SaveError::Serialization)?;
-                std::fs::write(std::path::Path::new("session.amyfx"), &contents) // TODO: allow user to set this
-                    .map_err(Into::into)
-                    .map_err(SaveError::Serialization)?;
+                if let Some(save_path) = file {
+                    let mut open_opts = std::fs::OpenOptions::new();
+                    match self {
+                        Self::Quit => open_opts.create_new(true).write(true),
+                        Self::SaveAndQuit => open_opts.create(true).truncate(true),
+                        _ => unreachable!(),
+                    };
+                    open_opts
+                        .write(true)
+                        .open(save_path)
+                        .and_then(|mut file| file.write_all(&contents))
+                        .map_err(Into::into)
+                        .map_err(SaveError::Serialization)?;
+                    return Ok(ControlFlow::Break(()));
+                } else {
+                    print_warning_recursive(&"no location to save");
+                }
+            }
+
+            Self::ForceQuit => {
                 return Ok(ControlFlow::Break(()));
             }
         }

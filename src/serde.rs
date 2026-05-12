@@ -200,22 +200,22 @@ impl Deserialize for Vec<u8> {
 macro_rules! serde_int {
     ($($Type:ident),*) => {$(
         impl Serialize for $Type {
-            type Error = io::Error;
+            type Error = std::io::Error;
 
             fn serialize<W>(&self, dst: &mut W, _: &()) -> Result<(), Self::Error>
             where
-                W: ?Sized + io::Write
+                W: ?Sized + std::io::Write
             {
                 dst.write_all(self.to_le_bytes().as_slice())
             }
         }
 
         impl Deserialize for $Type {
-            type Error = io::Error;
+            type Error = std::io::Error;
 
             fn deserialize<R>(src: &mut R, _: &mut ()) -> Result<Self, Self::Error>
             where
-                R: ?Sized + io::Read
+                R: ?Sized + std::io::Read
             {
                 <[u8; _]>::deserialize(src, &mut ()).map(Self::from_le_bytes)
             }
@@ -224,6 +224,71 @@ macro_rules! serde_int {
 }
 
 serde_int!(u16, u32, u64, u128, i8, i16, i32, i64, i128);
+
+#[derive(Debug, Error)]
+pub enum DeNonZeroError {
+    #[error("nonzero cannot be zero")]
+    Zero,
+
+    #[error(transparent)]
+    Conversion(#[from] std::num::TryFromIntError),
+
+    #[error(transparent)]
+    Read(#[from] io::Error),
+}
+
+impl From<DeUsizeError> for DeNonZeroError {
+    fn from(e: DeUsizeError) -> Self {
+        match e {
+            DeUsizeError::Conversion(e) => Self::Conversion(e),
+            DeUsizeError::Read(e) => Self::Read(e),
+        }
+    }
+}
+
+macro_rules! serde_nonzero {
+    ($($Type:ty),*) => {$(
+        impl Serialize for $Type {
+            type Error = SerUsizeError;
+
+            fn serialize<W>(&self, dst: &mut W, _: &()) -> Result<(), Self::Error>
+            where
+                W: ?Sized + std::io::Write
+            {
+                self.get().serialize(dst, &())?;
+                Ok(())
+            }
+        }
+
+        impl Deserialize for $Type {
+            type Error = DeNonZeroError;
+
+            fn deserialize<R>(src: &mut R, _: &mut ()) -> Result<Self, Self::Error>
+            where
+                R: ?Sized + std::io::Read
+            {
+                Self::new(Deserialize::deserialize(src, &mut ())?)
+                    .ok_or(DeNonZeroError::Zero)
+
+            }
+        }
+    )*};
+}
+
+serde_nonzero!(
+    std::num::NonZeroU8,
+    std::num::NonZeroU16,
+    std::num::NonZeroU32,
+    std::num::NonZeroU64,
+    std::num::NonZeroU128,
+    std::num::NonZeroUsize,
+    std::num::NonZeroI8,
+    std::num::NonZeroI16,
+    std::num::NonZeroI32,
+    std::num::NonZeroI64,
+    std::num::NonZeroI128,
+    std::num::NonZeroIsize
+);
 
 #[derive(Debug, Error)]
 pub enum SerUsizeError {

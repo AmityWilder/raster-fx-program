@@ -4,10 +4,11 @@ use crate::{
         LinkError, NewLayerError, OpenFileError, RemoveLayerError, ReorderLayersError,
     },
     error::IndexError,
+    message::{print_success_recursive, print_warning_recursive},
     rlgl::*,
     serde::{
-        DeImageError, DeStringError, DeUsizeError, Deserialize, DeserializeSlice, SerImageError,
-        SerUsizeError, Serialize, SerializeSlice,
+        DeImageError, DeNonZeroError, DeStringError, DeUsizeError, Deserialize, DeserializeSlice,
+        SerImageError, SerUsizeError, Serialize, SerializeSlice,
     },
     serde_pod,
 };
@@ -52,7 +53,7 @@ impl From<isize> for LayerPos {
 
 #[derive(Debug, Error)]
 pub enum ParseLayerPosError {
-    #[error("unrecognized position format: {}", .0)]
+    #[error("unrecognized position format: \"{}\"", .0)]
     Unknown(String),
 
     #[error("failed to parse position index")]
@@ -670,6 +671,9 @@ pub enum DeLayerError {
     #[error(transparent)]
     Utf8(#[from] std::string::FromUtf8Error),
 
+    #[error("nonzero cannot be zero")]
+    Zero,
+
     #[error("unknown variant: {0} ({0:#X})")]
     UnknownVariant(u8),
 
@@ -691,6 +695,16 @@ impl From<DeUsizeError> for DeLayerError {
         match e {
             DeUsizeError::Conversion(e) => Self::Conversion(e),
             DeUsizeError::Read(e) => Self::Read(e),
+        }
+    }
+}
+
+impl From<DeNonZeroError> for DeLayerError {
+    fn from(e: DeNonZeroError) -> Self {
+        match e {
+            DeNonZeroError::Zero => Self::Zero,
+            DeNonZeroError::Conversion(e) => Self::Conversion(e),
+            DeNonZeroError::Read(e) => Self::Read(e),
         }
     }
 }
@@ -870,10 +884,8 @@ impl Layer {
                         LayerContent::Unique { buffer } => buffer,
                         _ => unreachable!(),
                     };
-                    if buffer.width() != 0 {
-                        println!(
-                            "\x1b[1;95mwarning:\x1b[0m replacing artwork layer with linked asset"
-                        );
+                    if (buffer.width(), buffer.height()) != (0, 0) {
+                        print_warning_recursive(&"replacing artwork layer with linked asset");
                     }
                     *raster = LayerContent::Asset {
                         buffer: rtex.clone(),
@@ -1024,7 +1036,7 @@ impl Layers {
         let pos = at.insert_layer_idx(self.curr, self.list.len())?;
         let new_layer = self.list.insert_mut(pos, layer);
         self.curr = pos;
-        println!("\x1b[96mcreated layer\x1b[0m \"{}\"", new_layer.name);
+        print_success_recursive(&format!("created layer: \"{}\"", new_layer.name));
         Ok(new_layer)
     }
 
@@ -1055,7 +1067,7 @@ impl Layers {
         let to = self.select_idx(to).map_err(DstIndexOutOfBounds)?;
         match from.cmp(&to) {
             Less => self.list[from..=to].rotate_left(1),
-            Equal => println!("\x1b[1;95mwarning:\x1b[0m layer order unchanged"),
+            Equal => print_warning_recursive(&"layer order unchanged"),
             Greater => self.list[to..=from].rotate_right(1),
         }
         Ok(())
@@ -1080,7 +1092,7 @@ impl Layers {
             }
 
             None => {
-                println!("\x1b[1;95mwarning:\x1b[0m no layers removed");
+                print_warning_recursive(&"no layers removed");
             }
         }
         let mut layer_index = 0..self.list.len();
@@ -1091,13 +1103,18 @@ impl Layers {
                 .take_while(|&i| i <= self.curr)
                 .count(),
         );
+        println!("positions: {positions:?}");
         let mut pos = positions.into_iter().peekable();
         self.list.retain(|layer| {
             // SAFETY: positions cannot be negative, duplicative, or exceed the maximum layer index.
             // there cannot be more positions than layers.
-            pos.next_if_eq(&unsafe { layer_index.next().unwrap_unchecked() })
-                .inspect(|_| println!("\x1b[96mremoving\x1b[0m {}", layer.name))
-                .is_some()
+            let keep = pos
+                .next_if_eq(&layer_index.next().expect("should never exceed"))
+                .is_none();
+            if !keep {
+                print_success_recursive(&format!("removing layer: \"{}\"", layer.name));
+            }
+            keep
         });
         Ok(())
     }
