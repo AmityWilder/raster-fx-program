@@ -543,6 +543,24 @@ impl Deserialize<(&mut RaylibHandle, &RaylibThread)> for Assets {
     }
 }
 
+impl<'a> IntoIterator for &'a Assets {
+    type Item = &'a Asset;
+    type IntoIter = std::slice::Iter<'a, Asset>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut Assets {
+    type Item = &'a mut Asset;
+    type IntoIter = std::slice::IterMut<'a, Asset>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
 impl Assets {
     pub const fn new() -> Self {
         Self { list: Vec::new() }

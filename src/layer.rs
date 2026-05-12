@@ -975,6 +975,24 @@ impl Deserialize<(&mut RaylibHandle, &RaylibThread, &Assets)> for Layers {
     }
 }
 
+impl<'a> IntoIterator for &'a Layers {
+    type Item = &'a Layer;
+    type IntoIter = std::slice::Iter<'a, Layer>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut Layers {
+    type Item = &'a mut Layer;
+    type IntoIter = std::slice::IterMut<'a, Layer>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
 impl Layers {
     pub const fn new() -> Self {
         Self {
