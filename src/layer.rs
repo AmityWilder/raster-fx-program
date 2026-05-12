@@ -5,7 +5,6 @@ use crate::{
     },
     error::IndexError,
     message::{print_success_recursive, print_warning_recursive},
-    rlgl::*,
     serde::{
         DeImageError, DeNonZeroError, DeStringError, DeUsizeError, Deserialize, DeserializeSlice,
         SerImageError, SerUsizeError, Serialize, SerializeSlice,
@@ -13,6 +12,7 @@ use crate::{
     serde_pod,
 };
 use raylib::prelude::*;
+use rlgl::*;
 use std::{
     cell::RefCell,
     collections::{BTreeSet, TryReserveError},

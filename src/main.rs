@@ -38,7 +38,6 @@ mod command;
 mod error;
 mod layer;
 mod message;
-pub mod rlgl;
 mod serde;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
